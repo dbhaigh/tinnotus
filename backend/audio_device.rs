@@ -18,6 +18,8 @@ use std::time::Instant;
 const MAX_CHANNELS: usize = 8;
 const MAX_CALLBACK_FRAMES: usize = 16_384;
 const MAX_CALLBACK_SAMPLES: usize = MAX_CHANNELS * MAX_CALLBACK_FRAMES;
+const RESAMPLER_TAPS: usize = 32;
+const RESAMPLER_PHASES: usize = 1024;
 const PITCH_ANALYSIS_WINDOW_FRAMES: usize = 4096;
 const PITCH_ANALYSIS_INTERVAL: Duration = Duration::from_millis(250);
 
@@ -59,9 +61,7 @@ pub enum AudioDeviceError {
 impl fmt::Display for AudioDeviceError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::NoOutputDevice => {
-                formatter.write_str("no Windows audio output device is available")
-            }
+            Self::NoOutputDevice => formatter.write_str("no audio output device is available"),
             Self::OutputDeviceUnavailable(index) => {
                 write!(
                     formatter,
@@ -104,7 +104,7 @@ impl From<AudioError> for AudioDeviceError {
     }
 }
 
-pub struct WindowsAudioPlayback {
+pub struct AudioPlayback {
     stream: Stream,
     control: AudioEngineControl,
     shared: Arc<SharedPlaybackState>,
@@ -112,7 +112,7 @@ pub struct WindowsAudioPlayback {
     pitch_analysis: Option<PitchAnalysisWorker>,
 }
 
-impl WindowsAudioPlayback {
+impl AudioPlayback {
     pub fn start(
         source_samples: Vec<f32>,
         source_sample_rate: u32,
@@ -264,7 +264,10 @@ impl WindowsAudioPlayback {
     }
 }
 
-impl Drop for WindowsAudioPlayback {
+#[cfg(target_os = "windows")]
+pub type WindowsAudioPlayback = AudioPlayback;
+
+impl Drop for AudioPlayback {
     fn drop(&mut self) {
         self.shared.status.store(STATUS_STOPPED, Ordering::Release);
         if let Some(mut analysis) = self.pitch_analysis.take() {
@@ -381,8 +384,8 @@ fn convert_audio(
 ) -> Result<Vec<f32>, AudioDeviceError> {
     if input_rate == 0
         || output_rate == 0
-        || input_channels == 0
-        || output_channels == 0
+        || !(1..=MAX_CHANNELS).contains(&input_channels)
+        || !(1..=MAX_CHANNELS).contains(&output_channels)
         || !input.len().is_multiple_of(input_channels)
     {
         return Err(AudioDeviceError::InvalidAudio(
@@ -410,33 +413,99 @@ fn convert_audio(
         .map_err(|error| AudioDeviceError::InvalidAudio(error.to_string()))?;
     output.resize(output_len, 0.0);
 
+    if input_rate == output_rate {
+        for frame in 0..input_frames {
+            for channel in 0..output_channels {
+                output[frame * output_channels + channel] =
+                    mix_sample(input, frame, input_channels, output_channels, channel);
+            }
+        }
+        return Ok(output);
+    }
+
+    let kernel = build_resampler_kernel(input_rate, output_rate)?;
+    let last_input_frame = isize::try_from(input_frames - 1)
+        .map_err(|_| AudioDeviceError::InvalidAudio("audio is too large to convert".to_owned()))?;
     for output_frame in 0..output_frames {
         let source_position = output_frame as u128 * u128::from(input_rate);
-        let lower_frame = (source_position / u128::from(output_rate)) as usize;
-        let upper_frame = (lower_frame + 1).min(input_frames - 1);
-        let fraction = (source_position % u128::from(output_rate)) as f32 / output_rate as f32;
+        let center_frame = (source_position / u128::from(output_rate)) as isize;
+        let phase = ((source_position % u128::from(output_rate) * RESAMPLER_PHASES as u128)
+            / u128::from(output_rate)) as usize;
 
         for output_channel in 0..output_channels {
-            let lower = mix_sample(
-                input,
-                lower_frame,
-                input_channels,
-                output_channels,
-                output_channel,
-            );
-            let upper = mix_sample(
-                input,
-                upper_frame,
-                input_channels,
-                output_channels,
-                output_channel,
-            );
-            output[output_frame * output_channels + output_channel] =
-                lower + (upper - lower) * fraction;
+            let mut sample = 0.0_f64;
+            let kernel_start = phase * RESAMPLER_TAPS;
+            for tap in 0..RESAMPLER_TAPS {
+                let offset = tap as isize - (RESAMPLER_TAPS as isize / 2 - 1);
+                let source_frame = center_frame
+                    .saturating_add(offset)
+                    .clamp(0, last_input_frame) as usize;
+                let source_sample = mix_sample(
+                    input,
+                    source_frame,
+                    input_channels,
+                    output_channels,
+                    output_channel,
+                );
+                sample += f64::from(source_sample) * kernel[kernel_start + tap];
+            }
+            output[output_frame * output_channels + output_channel] = sample as f32;
         }
     }
 
     Ok(output)
+}
+
+fn build_resampler_kernel(input_rate: u32, output_rate: u32) -> Result<Vec<f64>, AudioDeviceError> {
+    let kernel_len = RESAMPLER_PHASES
+        .checked_mul(RESAMPLER_TAPS)
+        .ok_or_else(|| AudioDeviceError::InvalidAudio("resampler kernel overflow".to_owned()))?;
+    let mut kernel = Vec::new();
+    kernel
+        .try_reserve_exact(kernel_len)
+        .map_err(|error| AudioDeviceError::InvalidAudio(error.to_string()))?;
+    kernel.resize(kernel_len, 0.0);
+
+    let cutoff = 0.5 * (f64::from(output_rate) / f64::from(input_rate)).min(1.0) * 0.94;
+    let pi = std::f64::consts::PI;
+    let half_taps = RESAMPLER_TAPS as f64 / 2.0;
+
+    for phase in 0..RESAMPLER_PHASES {
+        let fraction = phase as f64 / RESAMPLER_PHASES as f64;
+        let kernel_start = phase * RESAMPLER_TAPS;
+        let mut coefficient_sum = 0.0;
+
+        for tap in 0..RESAMPLER_TAPS {
+            let offset = tap as f64 - (RESAMPLER_TAPS as f64 / 2.0 - 1.0) - fraction;
+            let normalized_offset = 2.0 * cutoff * offset;
+            let sinc = if normalized_offset.abs() < f64::EPSILON {
+                1.0
+            } else {
+                (pi * normalized_offset).sin() / (pi * normalized_offset)
+            };
+            let window_position = offset / half_taps;
+            let window = if window_position.abs() <= 1.0 {
+                0.42 + 0.5 * (pi * window_position).cos()
+                    + 0.08 * (2.0 * pi * window_position).cos()
+            } else {
+                0.0
+            };
+            let coefficient = 2.0 * cutoff * sinc * window;
+            kernel[kernel_start + tap] = coefficient;
+            coefficient_sum += coefficient;
+        }
+
+        if !coefficient_sum.is_finite() || coefficient_sum.abs() < f64::EPSILON {
+            return Err(AudioDeviceError::InvalidAudio(
+                "could not construct a stable resampler kernel".to_owned(),
+            ));
+        }
+        for coefficient in &mut kernel[kernel_start..kernel_start + RESAMPLER_TAPS] {
+            *coefficient /= coefficient_sum;
+        }
+    }
+
+    Ok(kernel)
 }
 
 fn mix_sample(
@@ -459,15 +528,6 @@ fn mix_sample(
             .copied()
             .sum::<f32>();
         return sum / input_channels as f32;
-    }
-    if output_channels < input_channels {
-        let mut sum = 0.0;
-        let mut count = 0;
-        for channel in (output_channel..input_channels).step_by(output_channels) {
-            sum += input[frame_start + channel];
-            count += 1;
-        }
-        return sum / count as f32;
     }
     if output_channel < input_channels {
         input[frame_start + output_channel]
@@ -523,6 +583,15 @@ impl SharedPlaybackState {
         let _ = self.status.compare_exchange(
             STATUS_PLAYING,
             STATUS_CALLBACK_ERROR,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
+    }
+
+    fn fail_device(&self) {
+        let _ = self.status.compare_exchange(
+            STATUS_PLAYING,
+            STATUS_DEVICE_ERROR,
             Ordering::AcqRel,
             Ordering::Acquire,
         );
@@ -856,11 +925,7 @@ fn build_typed_stream<T: OutputSample>(
         .build_output_stream::<T, _, _>(
             config,
             move |output: &mut [T], info| renderer.render(output, Some(info.timestamp().callback)),
-            move |_error| {
-                error_state
-                    .status
-                    .store(STATUS_DEVICE_ERROR, Ordering::Release)
-            },
+            move |_error| error_state.fail_device(),
             None,
         )
         .map_err(|error: BuildStreamError| AudioDeviceError::Stream(error.to_string()))
@@ -871,17 +936,88 @@ mod tests {
     use super::*;
     use std::time::Duration;
 
+    fn configured_endpoint_test_seconds() -> u64 {
+        let seconds = match std::env::var("TINNOTUS_AUDIO_ENDPOINT_TEST_SECONDS") {
+            Ok(value) => value
+                .parse::<u64>()
+                .expect("TINNOTUS_AUDIO_ENDPOINT_TEST_SECONDS must be an integer"),
+            Err(std::env::VarError::NotPresent) => 1,
+            Err(error) => panic!("could not read TINNOTUS_AUDIO_ENDPOINT_TEST_SECONDS: {error}"),
+        };
+        assert!(
+            (1..=120).contains(&seconds),
+            "TINNOTUS_AUDIO_ENDPOINT_TEST_SECONDS must be between 1 and 120"
+        );
+        seconds
+    }
+
     #[test]
-    fn resamples_and_remixes_before_playback() {
-        let output = convert_audio(&[0.25, -0.5], 44_100, 1, 48_000, 2).expect("valid conversion");
+    fn resamples_constant_audio_and_duplicates_mono() {
+        let output = convert_audio(&[0.25, 0.25], 44_100, 1, 48_000, 2).expect("valid conversion");
 
         assert_eq!(output.len(), 6);
-        assert_eq!(output[0], 0.25);
-        assert_eq!(output[1], 0.25);
-        assert!(output[2] < output[0]);
-        assert_eq!(output[2], output[3]);
-        assert_eq!(output[4], -0.5);
-        assert_eq!(output[4], output[5]);
+        for frame in output.chunks_exact(2) {
+            assert!((frame[0] - 0.25).abs() < 1.0e-5);
+            assert_eq!(frame[0], frame[1]);
+        }
+    }
+
+    #[test]
+    fn downsampling_preserves_passband_and_rejects_aliases() {
+        const INPUT_RATE: u32 = 48_000;
+        const OUTPUT_RATE: u32 = 24_000;
+        const INPUT_FRAMES: usize = INPUT_RATE as usize;
+
+        let passband: Vec<f32> = (0..INPUT_FRAMES)
+            .map(|frame| {
+                (std::f64::consts::TAU * 1000.0 * frame as f64 / f64::from(INPUT_RATE)).sin() as f32
+            })
+            .collect();
+        let output =
+            convert_audio(&passband, INPUT_RATE, 1, OUTPUT_RATE, 1).expect("valid conversion");
+        let passband_rms = rms(&output[100..output.len() - 100]);
+        assert!((passband_rms - std::f64::consts::FRAC_1_SQRT_2).abs() < 0.01);
+
+        let stopband: Vec<f32> = (0..INPUT_FRAMES)
+            .map(|frame| {
+                (std::f64::consts::TAU * 18_000.0 * frame as f64 / f64::from(INPUT_RATE)).sin()
+                    as f32
+            })
+            .collect();
+        let output =
+            convert_audio(&stopband, INPUT_RATE, 1, OUTPUT_RATE, 1).expect("valid conversion");
+        let alias_rms = rms(&output[100..output.len() - 100]);
+        assert!(alias_rms < 0.01, "downsampling alias RMS was {alias_rms}");
+    }
+
+    #[test]
+    fn channel_mapping_preserves_order_and_handles_mismatched_counts_conservatively() {
+        assert_eq!(
+            convert_audio(&[0.5, -0.25], 48_000, 2, 48_000, 2).expect("same layout"),
+            [0.5, -0.25]
+        );
+        assert_eq!(
+            convert_audio(&[0.5, -0.25], 48_000, 2, 48_000, 1).expect("downmix to mono"),
+            [0.125]
+        );
+        assert_eq!(
+            convert_audio(&[0.5, -0.25], 48_000, 2, 48_000, 4).expect("preserve common channels"),
+            [0.5, -0.25, 0.0, 0.0]
+        );
+        assert_eq!(
+            convert_audio(&[0.5, -0.25, 0.75, -1.0], 48_000, 4, 48_000, 2)
+                .expect("drop channels without a known layout"),
+            [0.5, -0.25]
+        );
+    }
+
+    fn rms(samples: &[f32]) -> f64 {
+        (samples
+            .iter()
+            .map(|sample| f64::from(*sample).powi(2))
+            .sum::<f64>()
+            / samples.len() as f64)
+            .sqrt()
     }
 
     #[test]
@@ -903,6 +1039,25 @@ mod tests {
 
         assert_eq!(output, [0.25, -0.5, 0.0, 0.0]);
         assert_eq!(shared.status.load(Ordering::Acquire), STATUS_FINISHED);
+    }
+
+    #[test]
+    fn late_device_errors_do_not_replace_terminal_status() {
+        let shared = SharedPlaybackState::new();
+        shared.status.store(STATUS_PLAYING, Ordering::Relaxed);
+        shared.fail_device();
+        assert_eq!(shared.status.load(Ordering::Relaxed), STATUS_DEVICE_ERROR);
+
+        for terminal_status in [
+            STATUS_FINISHED,
+            STATUS_STOPPED,
+            STATUS_DEVICE_ERROR,
+            STATUS_CALLBACK_ERROR,
+        ] {
+            shared.status.store(terminal_status, Ordering::Relaxed);
+            shared.fail_device();
+            assert_eq!(shared.status.load(Ordering::Relaxed), terminal_status);
+        }
     }
 
     #[test]
@@ -1007,36 +1162,67 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires an active Windows audio endpoint"]
-    fn default_wasapi_device_plays_silence_to_completion() {
-        if cpal::default_host().default_output_device().is_none() {
-            eprintln!("No active Windows output device; hardware smoke test skipped.");
-            return;
-        }
+    #[ignore = "requires an active audio endpoint"]
+    fn default_device_plays_silence_to_completion() {
+        assert!(
+            cpal::default_host().default_output_device().is_some(),
+            "an active output endpoint is required for this opt-in test"
+        );
         assert!(!enumerate_output_devices()
-            .expect("enumerate Windows output devices")
+            .expect("enumerate output devices")
             .is_empty());
 
+        let seconds = configured_endpoint_test_seconds();
+        let sample_count = usize::try_from(u64::from(48_000_u32) * seconds)
+            .expect("test duration fits in address space");
         let mut playback =
-            WindowsAudioPlayback::start(vec![0.0; 48_000], 48_000, 1, None, 1000.0, 100.0)
-                .expect("open and start the default WASAPI endpoint");
+            AudioPlayback::start(vec![0.0; sample_count], 48_000, 1, None, 1000.0, 100.0)
+                .expect("open and start the default output endpoint");
         std::thread::sleep(Duration::from_millis(50));
         playback
             .set_notch(0, 1200.0, 120.0)
             .expect("queue a live notch update");
-        let timeout = Instant::now() + Duration::from_secs(10);
+        let timeout = Instant::now() + Duration::from_secs(seconds + 10);
         while playback.status() == AudioPlaybackStatus::Playing && Instant::now() < timeout {
             std::thread::sleep(Duration::from_millis(10));
-            playback.poll().expect("poll WASAPI playback");
+            playback.poll().expect("poll output playback");
         }
 
         assert_eq!(playback.status(), AudioPlaybackStatus::Finished);
 
         let mut stopped_playback =
-            WindowsAudioPlayback::start(vec![0.0; 48_000], 48_000, 1, None, 1000.0, 100.0)
-                .expect("restart the default WASAPI endpoint");
+            AudioPlayback::start(vec![0.0; 48_000], 48_000, 1, None, 1000.0, 100.0)
+                .expect("restart the default output endpoint");
         std::thread::sleep(Duration::from_millis(50));
-        stopped_playback.stop().expect("stop WASAPI playback");
+        stopped_playback.stop().expect("stop output playback");
         assert_eq!(stopped_playback.status(), AudioPlaybackStatus::Stopped);
+    }
+
+    #[test]
+    #[ignore = "requires an active audio endpoint"]
+    fn selected_device_supports_repeated_start_stop() {
+        let selected_device = enumerate_output_devices()
+            .expect("enumerate output devices")
+            .into_iter()
+            .next()
+            .expect("at least one output endpoint is available");
+
+        for _ in 0..3 {
+            let mut playback = AudioPlayback::start(
+                vec![0.0; 4_800],
+                48_000,
+                1,
+                Some(selected_device.clone()),
+                1000.0,
+                100.0,
+            )
+            .expect("start the selected output endpoint");
+            playback.stop().expect("stop the selected endpoint");
+            playback.stop().expect("stop is idempotent");
+            assert_eq!(
+                playback.poll().expect("poll after stopping"),
+                AudioPlaybackStatus::Stopped
+            );
+        }
     }
 }

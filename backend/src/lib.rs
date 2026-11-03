@@ -407,15 +407,18 @@ fn map_status(status: c_int) -> Result<(), AudioError> {
     }
 }
 
-#[cfg(target_os = "windows")]
-#[path = "../windows/audio_device.rs"]
+#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+#[path = "../audio_device.rs"]
 mod audio_device;
 
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
 pub use audio_device::{
-    enumerate_output_devices, AudioDeviceError, AudioPlaybackStatus, OutputDeviceInfo,
-    WindowsAudioPlayback,
+    enumerate_output_devices, AudioDeviceError, AudioPlayback, AudioPlaybackStatus,
+    OutputDeviceInfo,
 };
+
+#[cfg(target_os = "windows")]
+pub use audio_device::WindowsAudioPlayback;
 
 #[cfg(test)]
 mod tests {

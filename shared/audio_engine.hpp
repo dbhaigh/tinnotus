@@ -76,6 +76,7 @@ private:
     };
 
     static constexpr std::size_t command_queue_capacity = 16;
+    static constexpr std::size_t notch_transition_milliseconds = 20;
 
     bool calculateCoefficients(
         double center_frequency_hz,
@@ -83,16 +84,26 @@ private:
         Coefficients& coefficients
     ) const noexcept;
     bool enqueue(const Command& command) noexcept;
+    bool hasActiveTransitions() const noexcept;
+    void advanceNotchTransitions() noexcept;
+    void copySimdStatesToScalar() noexcept;
+    void copyScalarStatesToSimd() noexcept;
     void applyPendingCommands() noexcept;
 
     int sample_rate_;
     std::size_t channels_;
     bool valid_;
+    bool has_processed_audio_ = false;
     std::array<Command, command_queue_capacity> commands_{};
     alignas(64) std::atomic<std::size_t> command_read_index_{0};
     alignas(64) std::atomic<std::size_t> command_write_index_{0};
     std::array<Coefficients, max_notches> coefficients_{};
+    std::array<Coefficients, max_notches> transition_start_coefficients_{};
+    std::array<Coefficients, max_notches> transition_target_coefficients_{};
     std::array<bool, max_notches> enabled_{};
+    std::array<bool, max_notches> transition_target_enabled_{};
+    std::array<std::size_t, max_notches> transition_total_samples_{};
+    std::array<std::size_t, max_notches> transition_remaining_samples_{};
     std::array<std::array<FilterState, max_channels>, max_notches> scalar_states_{};
     std::array<SimdFilterState, max_notches> simd_states_{};
 };

@@ -96,17 +96,17 @@ REGIONS = (
         CPP_RULES,
     ),
     (
-        "backend/windows/audio_device.rs",
+        "backend/audio_device.rs",
         "    fn render<T: OutputSample>(",
         "trait OutputSample:",
         "PlaybackRenderer::render",
         RUST_RULES,
     ),
     (
-        "backend/windows/audio_device.rs",
+        "backend/audio_device.rs",
         "move |output: &mut [T], info|",
         "move |_error|",
-        "Windows CPAL output callback",
+        "CPAL output callback",
         RUST_RULES,
     ),
 )

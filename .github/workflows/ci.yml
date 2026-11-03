@@ -42,6 +42,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install --yes \
             pkg-config \
+            libasound2-dev \
             libegl1-mesa-dev \
             libgbm-dev \
             libwayland-dev \
@@ -62,7 +63,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: build/ci-native
-          key: cmake-native-${{ runner.os }}-${{ hashFiles('CMakeLists.txt', 'backend/CMakeLists.txt', 'backend/test/**', 'cmake/**', 'shared/**') }}
+          key: cmake-native-${{ runner.os }}-${{ hashFiles('CMakeLists.txt', 'backend/CMakeLists.txt', 'backend/test/**', 'backend/bench/**', 'cmake/**', 'shared/**') }}
           restore-keys: |
             cmake-native-${{ runner.os }}-
 
@@ -72,7 +73,7 @@ jobs:
 
       - name: Configure native tests (Visual Studio)
         if: runner.os == 'Windows'
-        run: cmake -S . -B build/ci-native -DTINNOTUS_BUILD_TEST=ON
+        run: cmake -S . -B build/ci-native -DTINNOTUS_BUILD_TEST=ON -DTINNOTUS_BUILD_BENCH=ON
 
       - name: Build native core and tests
         run: cmake --build build/ci-native --config Release --parallel
@@ -89,8 +90,7 @@ jobs:
       - name: Test Rust workspace
         run: cargo test --workspace --locked
 
-      - name: Exercise virtual Windows audio callback for 30 seconds
-        if: runner.os == 'Windows'
+      - name: Exercise virtual audio callback for 30 seconds
         run: cargo test -p tinnotus-audio-backend --locked virtual_null_output_runs_for_thirty_seconds -- --ignored
 
       - name: Build Rust workspace

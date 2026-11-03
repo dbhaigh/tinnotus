@@ -122,6 +122,49 @@ bool AudioEngine::process(
     }
 
     applyPendingCommands();
+    if (frame_count != 0) {
+        has_processed_audio_ = true;
+    }
+
+    std::size_t transitioned_frames = 0;
+    while (transitioned_frames < frame_count && hasActiveTransitions()) {
+        advanceNotchTransitions();
+        const std::size_t frame_offset = transitioned_frames * channels_;
+        for (std::size_t channel = 0; channel < channels_; ++channel) {
+            const std::size_t sample_index = frame_offset + channel;
+            double sample = input[sample_index];
+
+            for (std::size_t notch = 0; notch < max_notches; ++notch) {
+                if (!enabled_[notch]) {
+                    continue;
+                }
+
+                const Coefficients& coefficients = coefficients_[notch];
+                FilterState& state = scalar_states_[notch][channel];
+                const double filtered = coefficients.b0 * sample + state.z1;
+                state.z1 = coefficients.b1 * sample - coefficients.a1 * filtered +
+                           state.z2;
+                state.z2 = coefficients.b2 * sample - coefficients.a2 * filtered;
+                sample = filtered;
+            }
+
+            output[sample_index] = static_cast<float>(sample);
+        }
+        ++transitioned_frames;
+    }
+
+    if (transitioned_frames != 0 && !hasActiveTransitions()) {
+        copyScalarStatesToSimd();
+    }
+    if (transitioned_frames == frame_count) {
+        return true;
+    }
+    if (transitioned_frames != 0) {
+        const std::size_t consumed_samples = transitioned_frames * channels_;
+        input += consumed_samples;
+        output += consumed_samples;
+        frame_count -= transitioned_frames;
+    }
 
 #if defined(TINNOTUS_AUDIO_USE_AVX2) || \
     defined(TINNOTUS_AUDIO_USE_SSE2) || \
@@ -344,6 +387,82 @@ bool AudioEngine::enqueue(const Command& command) noexcept {
     return true;
 }
 
+bool AudioEngine::hasActiveTransitions() const noexcept {
+    return std::any_of(
+        transition_remaining_samples_.begin(),
+        transition_remaining_samples_.end(),
+        [](std::size_t remaining) { return remaining != 0; }
+    );
+}
+
+void AudioEngine::advanceNotchTransitions() noexcept {
+    for (std::size_t notch = 0; notch < max_notches; ++notch) {
+        std::size_t& remaining = transition_remaining_samples_[notch];
+        if (remaining == 0) {
+            continue;
+        }
+
+        const std::size_t elapsed = transition_total_samples_[notch] - remaining + 1;
+        const double progress =
+            static_cast<double>(elapsed) / static_cast<double>(transition_total_samples_[notch]);
+        const Coefficients& start = transition_start_coefficients_[notch];
+        const Coefficients& target = transition_target_coefficients_[notch];
+        Coefficients current;
+        current.b0 = start.b0 + (target.b0 - start.b0) * progress;
+        current.b1 = start.b1 + (target.b1 - start.b1) * progress;
+        current.b2 = start.b2 + (target.b2 - start.b2) * progress;
+        current.a1 = start.a1 + (target.a1 - start.a1) * progress;
+        current.a2 = start.a2 + (target.a2 - start.a2) * progress;
+        coefficients_[notch] = current;
+        --remaining;
+
+        if (remaining == 0) {
+            coefficients_[notch] = target;
+            if (transition_target_enabled_[notch]) {
+                enabled_[notch] = true;
+            } else {
+                enabled_[notch] = false;
+                scalar_states_[notch].fill(FilterState{});
+                simd_states_[notch] = SimdFilterState{};
+            }
+        }
+    }
+}
+
+void AudioEngine::copySimdStatesToScalar() noexcept {
+#if defined(TINNOTUS_AUDIO_USE_AVX2) || \
+    defined(TINNOTUS_AUDIO_USE_SSE2) || \
+    defined(TINNOTUS_AUDIO_USE_NEON)
+    if (channels_ < 6) {
+        return;
+    }
+    for (std::size_t notch = 0; notch < max_notches; ++notch) {
+        for (std::size_t channel = 0; channel < channels_; ++channel) {
+            scalar_states_[notch][channel] = {
+                simd_states_[notch].z1[channel],
+                simd_states_[notch].z2[channel],
+            };
+        }
+    }
+#endif
+}
+
+void AudioEngine::copyScalarStatesToSimd() noexcept {
+#if defined(TINNOTUS_AUDIO_USE_AVX2) || \
+    defined(TINNOTUS_AUDIO_USE_SSE2) || \
+    defined(TINNOTUS_AUDIO_USE_NEON)
+    if (channels_ < 6) {
+        return;
+    }
+    for (std::size_t notch = 0; notch < max_notches; ++notch) {
+        for (std::size_t channel = 0; channel < channels_; ++channel) {
+            simd_states_[notch].z1[channel] = scalar_states_[notch][channel].z1;
+            simd_states_[notch].z2[channel] = scalar_states_[notch][channel].z2;
+        }
+    }
+#endif
+}
+
 void AudioEngine::applyPendingCommands() noexcept {
     std::size_t read_index = command_read_index_.load(std::memory_order_relaxed);
     const std::size_t write_index = command_write_index_.load(std::memory_order_acquire);
@@ -352,12 +471,62 @@ void AudioEngine::applyPendingCommands() noexcept {
         command_queue_capacity
     );
 
+    if (pending != 0 && !hasActiveTransitions()) {
+        copySimdStatesToScalar();
+    }
+
     for (std::size_t i = 0; i < pending; ++i) {
         const Command& command = commands_[read_index % command_queue_capacity];
-        coefficients_[command.index] = command.coefficients;
-        enabled_[command.index] = command.enabled;
-        scalar_states_[command.index].fill(FilterState{});
-        simd_states_[command.index] = SimdFilterState{};
+        const Coefficients target = command.enabled ? command.coefficients : Coefficients{};
+        if (!has_processed_audio_) {
+            coefficients_[command.index] = target;
+            enabled_[command.index] = command.enabled;
+            transition_start_coefficients_[command.index] = target;
+            transition_target_coefficients_[command.index] = target;
+            transition_target_enabled_[command.index] = command.enabled;
+            transition_total_samples_[command.index] = 0;
+            transition_remaining_samples_[command.index] = 0;
+            scalar_states_[command.index].fill(FilterState{});
+            simd_states_[command.index] = SimdFilterState{};
+            ++read_index;
+            continue;
+        }
+
+        const bool transition_active = transition_remaining_samples_[command.index] != 0;
+        const Coefficients& existing_target = transition_active
+            ? transition_target_coefficients_[command.index]
+            : coefficients_[command.index];
+        const bool existing_enabled = transition_active
+            ? transition_target_enabled_[command.index]
+            : enabled_[command.index];
+        const bool same_target =
+            existing_target.b0 == target.b0 &&
+            existing_target.b1 == target.b1 &&
+            existing_target.b2 == target.b2 &&
+            existing_target.a1 == target.a1 &&
+            existing_target.a2 == target.a2;
+        if (existing_enabled == command.enabled && same_target) {
+            ++read_index;
+            continue;
+        }
+
+        if (!enabled_[command.index] && command.enabled && !transition_active) {
+            scalar_states_[command.index].fill(FilterState{});
+            simd_states_[command.index] = SimdFilterState{};
+        }
+
+        transition_start_coefficients_[command.index] = coefficients_[command.index];
+        transition_target_coefficients_[command.index] = target;
+        transition_target_enabled_[command.index] = command.enabled;
+        transition_total_samples_[command.index] = std::max(
+            std::size_t{1},
+            static_cast<std::size_t>(sample_rate_) * notch_transition_milliseconds / 1000
+        );
+        transition_remaining_samples_[command.index] =
+            transition_total_samples_[command.index];
+        if (enabled_[command.index] || command.enabled) {
+            enabled_[command.index] = true;
+        }
         ++read_index;
     }
 

@@ -4,10 +4,8 @@ use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
-#[cfg(target_os = "windows")]
-use tinnotus::{
-    load_wav_for_playback, AudioPlaybackStatus, OutputDeviceInfo, WindowsAudioPlayback,
-};
+#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+use tinnotus::{load_wav_for_playback, AudioPlayback, AudioPlaybackStatus, OutputDeviceInfo};
 use tinnotus::{process_wav, WavError};
 
 #[derive(Default)]
@@ -26,16 +24,18 @@ struct TinnotusApp {
     progress: Option<Arc<ProcessingProgress>>,
     result_receiver: Option<Receiver<Result<(), WavError>>>,
     status: String,
-    #[cfg(target_os = "windows")]
+    #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
     output_devices: Vec<OutputDeviceInfo>,
-    #[cfg(target_os = "windows")]
+    #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
     output_devices_loaded: bool,
-    #[cfg(target_os = "windows")]
+    #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
     selected_output_device: Option<OutputDeviceInfo>,
-    #[cfg(target_os = "windows")]
-    playback: Option<WindowsAudioPlayback>,
-    #[cfg(target_os = "windows")]
+    #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+    playback: Option<AudioPlayback>,
+    #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
     live_status: String,
+    #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+    reported_playback_status: Option<AudioPlaybackStatus>,
 }
 
 impl Default for TinnotusApp {
@@ -50,16 +50,18 @@ impl Default for TinnotusApp {
             progress: None,
             result_receiver: None,
             status: String::from("Choose a WAV input and a new output path."),
-            #[cfg(target_os = "windows")]
+            #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
             output_devices: Vec::new(),
-            #[cfg(target_os = "windows")]
+            #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
             output_devices_loaded: false,
-            #[cfg(target_os = "windows")]
+            #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
             selected_output_device: None,
-            #[cfg(target_os = "windows")]
+            #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
             playback: None,
-            #[cfg(target_os = "windows")]
+            #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
             live_status: String::from("Select an output device or use the system default."),
+            #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+            reported_playback_status: None,
         }
     }
 }
@@ -157,7 +159,7 @@ impl TinnotusApp {
         }
     }
 
-    #[cfg(target_os = "windows")]
+    #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
     fn refresh_output_devices(&mut self) {
         match tinnotus::enumerate_output_devices() {
             Ok(devices) => {
@@ -189,7 +191,7 @@ impl TinnotusApp {
         self.output_devices_loaded = true;
     }
 
-    #[cfg(target_os = "windows")]
+    #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
     fn start_live_playback(&mut self) {
         let previous_stop_error = self
             .playback
@@ -197,6 +199,7 @@ impl TinnotusApp {
             .and_then(|playback| playback.stop().err())
             .map(|error| error.to_string());
         self.playback = None;
+        self.reported_playback_status = None;
 
         let input_path = PathBuf::from(self.input_path.trim());
         if input_path.as_os_str().is_empty() {
@@ -211,7 +214,7 @@ impl TinnotusApp {
                 return;
             }
         };
-        match WindowsAudioPlayback::start(
+        match AudioPlayback::start(
             audio.samples,
             audio.sample_rate,
             audio.channels,
@@ -225,7 +228,7 @@ impl TinnotusApp {
                     Some(error) => format!(
                         "WAV playback started, but closing the previous stream reported: {error}"
                     ),
-                    None => "WAV playback started in Windows shared mode.".to_owned(),
+                    None => "WAV playback started.".to_owned(),
                 };
             }
             Err(error) => {
@@ -239,44 +242,68 @@ impl TinnotusApp {
         }
     }
 
-    #[cfg(target_os = "windows")]
+    #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
     fn stop_live_playback(&mut self) {
         if let Some(playback) = self.playback.as_mut() {
-            match playback.stop() {
+            let result = playback.stop();
+            self.reported_playback_status = Some(playback.status());
+            match result {
                 Ok(()) => self.live_status = "Playback stopped.".to_owned(),
                 Err(error) => self.live_status = format!("Could not stop playback: {error}"),
             }
         }
     }
 
-    #[cfg(target_os = "windows")]
+    #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
     fn update_live_playback_status(&mut self) {
-        let result = self.playback.as_mut().map(WindowsAudioPlayback::poll);
+        let result = self.playback.as_mut().map(AudioPlayback::poll);
         match result {
-            Some(Ok(AudioPlaybackStatus::Finished)) => {
-                self.live_status = "Playback finished.".to_owned();
+            Some(Ok(status)) => {
+                if self.reported_playback_status != Some(status) {
+                    self.reported_playback_status = Some(status);
+                    match status {
+                        AudioPlaybackStatus::Finished => {
+                            self.live_status = "Playback finished.".to_owned();
+                        }
+                        AudioPlaybackStatus::DeviceError => {
+                            self.live_status = "The output device stopped or disconnected; refresh devices and restart playback.".to_owned();
+                        }
+                        AudioPlaybackStatus::CallbackError => {
+                            self.live_status = "The audio callback failed; stop playback and retry with a supported device format.".to_owned();
+                        }
+                        AudioPlaybackStatus::Stopped => {
+                            self.live_status = "Playback stopped.".to_owned();
+                        }
+                        AudioPlaybackStatus::Playing => {}
+                    }
+                }
             }
-            Some(Ok(AudioPlaybackStatus::DeviceError)) => {
-                self.live_status =
-                    "The output device stopped or disconnected; refresh devices and restart playback."
-                        .to_owned();
-            }
-            Some(Ok(AudioPlaybackStatus::CallbackError)) => {
-                self.live_status =
-                    "The audio callback failed; stop playback and retry with a supported device format."
-                        .to_owned();
-            }
-            Some(Ok(AudioPlaybackStatus::Stopped)) => {
-                self.live_status = "Playback stopped.".to_owned();
-            }
-            Some(Ok(AudioPlaybackStatus::Playing)) | None => {}
             Some(Err(error)) => {
-                self.live_status = format!("Audio playback polling failed: {error}");
+                let status = self.playback.as_ref().map(AudioPlayback::status);
+                self.reported_playback_status = status;
+                self.live_status = match status {
+                    Some(AudioPlaybackStatus::DeviceError) => format!(
+                        "The output device stopped or disconnected; refresh devices and restart playback. Stream cleanup also reported: {error}"
+                    ),
+                    Some(AudioPlaybackStatus::CallbackError) => format!(
+                        "The audio callback failed; stream cleanup also reported: {error}"
+                    ),
+                    Some(AudioPlaybackStatus::Finished) => {
+                        format!("Playback finished, but stream cleanup failed: {error}")
+                    }
+                    Some(AudioPlaybackStatus::Stopped) => {
+                        format!("Playback stopped, but stream cleanup failed: {error}")
+                    }
+                    Some(AudioPlaybackStatus::Playing) | None => {
+                        format!("Audio playback polling failed: {error}")
+                    }
+                };
             }
+            None => self.reported_playback_status = None,
         }
     }
 
-    #[cfg(target_os = "windows")]
+    #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
     fn update_live_notch(&mut self) {
         if let Some(playback) = self.playback.as_mut() {
             if playback.status() == AudioPlaybackStatus::Playing {
@@ -296,7 +323,7 @@ impl eframe::App for TinnotusApp {
         if self.processing {
             context.request_repaint_after(Duration::from_millis(50));
         }
-        #[cfg(target_os = "windows")]
+        #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
         {
             if !self.output_devices_loaded {
                 self.refresh_output_devices();
@@ -330,13 +357,13 @@ impl eframe::App for TinnotusApp {
                     .text("Bandwidth (Hz)"),
             )
                 .changed();
-            #[cfg(target_os = "windows")]
+            #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
             if _notch_changed {
                 self.update_live_notch();
             }
 
             ui.label("Supports 16/24/32-bit PCM and 32-bit floating-point WAV.");
-            ui.label("Processing is block-based; live playback is available on Windows.");
+            ui.label("WAV processing is block-based.");
             ui.add_space(8.0);
 
             if self.processing {
@@ -364,11 +391,11 @@ impl eframe::App for TinnotusApp {
 
             ui.label(self.status.as_str());
 
-            #[cfg(target_os = "windows")]
+            #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
             {
                 ui.separator();
                 ui.heading("Live WAV playback");
-                ui.label("Windows WASAPI shared mode; WAV decoding and format conversion happen before playback.");
+                ui.label("CPAL output stream; WAV decoding and format conversion happen before playback.");
                 let selected_name = self
                     .selected_output_device
                     .as_ref()
@@ -449,11 +476,11 @@ impl eframe::App for TinnotusApp {
                     ));
                 }
             }
-            #[cfg(not(target_os = "windows"))]
-            ui.label("Live device playback is currently supported on Windows only.");
+            #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+            ui.label("Live device playback is unsupported on this target.");
         });
 
-        #[cfg(target_os = "windows")]
+        #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
         if self
             .playback
             .as_ref()
