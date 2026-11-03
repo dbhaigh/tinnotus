@@ -2,7 +2,7 @@
 
 **Updated:** 2026-11-03
 **Version:** 0.0.0.2
-**Status:** Experimental audio core, WAV workflow, and cross-platform CPAL output path; macOS/Linux validation pending
+**Status:** Experimental audio core and cross-platform CPAL output path; macOS/Linux endpoint validation pending
 
 ## Implemented
 
@@ -27,7 +27,7 @@
 
 The processing path is designed to avoid allocations and locks. This is a code-level property, not a measured device-latency or performance claim. The native-engine regression gate does not include CPAL callback conversion or hardware scheduling.
 
-The native CTest suite, including the Windows Release performance-budget smoke test, `cargo test --workspace`, and both opt-in endpoint smoke tests pass in the current Windows workspace. The existing MSVC benchmark report's worst p99 is 0.675% of its block deadline across 450 cases; the 25% CI limit leaves substantial room for runner variation. The latest hosted `main` CI run passed before these local changes; the current uncommitted changes still need a cross-platform matrix run. macOS/Linux device validation and audible/manual checks remain outstanding.
+The native CTest suite, including the Windows Release performance-budget smoke test, `cargo test --workspace`, and both opt-in endpoint smoke tests pass in the current Windows workspace. The existing MSVC benchmark report's worst p99 is 0.675% of its block deadline across 450 cases; the 25% CI limit leaves substantial room for runner variation. The hosted [cross-platform CI run](https://github.com/dbhaigh/tinnotus/actions/runs/41708350985) passed all configured Windows/macOS/Linux Release, Rust, real-time guard, and sanitizer jobs. That confirms automated build/test coverage, not audible output or device behavior. macOS/Linux endpoint tests and manual playback, hotplug, high-load, and end-to-end measurement remain outstanding.
 The playback UI reports callback-cadence misses as a possible-underrun indicator and displays the latest pitch estimate when available. The indicator uses CPAL callback timestamps; it is not an execution-time measurement or hardware underrun counter. Pitch behavior still needs manual verification with representative real WAVs. No real-device latency, device CPU, or hardware underrun measurements have been run. The native benchmark reports engine processing-call latency, throughput, and an elapsed-time CPU estimate.
 
 Cargo requires three-component SemVer, so the workspace package version `0.0.0+2` encodes product version `0.0.0.2`; both active Rust packages inherit the workspace version, and Cargo treats `+2` as build metadata. The excluded legacy `shared/Cargo.toml` carries the same version but is not part of the active Cargo workspace.

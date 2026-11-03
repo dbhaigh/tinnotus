@@ -1,6 +1,6 @@
 # Tinnotus Audio Backend
 
-The CMake target builds the portable processing engine in `shared/audio_engine.cpp` and its C ABI. The Rust backend wraps that engine and provides output-only WAV playback through the shared CPAL adapter in `audio_device.rs` (WASAPI shared mode on Windows). The older platform-specific C++ device files remain prototypes and are not part of the CMake target. macOS/Linux builds and endpoint checks for the current changes remain pending. See the [real-time rules](../docs/REALTIME_RULES.md) and the prototype markers in platform folders for current scope.
+The CMake target builds the portable processing engine in `shared/audio_engine.cpp` and its C ABI. The Rust backend wraps that engine and provides output-only WAV playback through the shared CPAL adapter in `audio_device.rs` (WASAPI shared mode on Windows). The older platform-specific C++ device files remain prototypes and are not part of the CMake target. Hosted macOS/Linux builds and tests pass; endpoint checks remain pending. See the [real-time rules](../docs/REALTIME_RULES.md) and the prototype markers in platform folders for current scope.
 
 ## Build and test
 

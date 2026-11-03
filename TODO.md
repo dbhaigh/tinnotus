@@ -13,12 +13,12 @@ The previous checklist described unverified platform and UI features as complete
 ## Priority 1: Verify the native core
 
 - [x] Build the native target and run its test executable in the current Windows workspace.
-- [ ] Configure, build, and run the native tests on macOS and Linux.
+- [x] Configure, build, and run the native tests on macOS and Linux in the hosted CI matrix.
 - [x] Add long-duration and concurrent producer/consumer tests for the SPSC buffer and command queue.
 - [x] Add sanitizer coverage where supported.
 - [x] Benchmark processing across sample rates, channel counts, notch counts, and block sizes; document the hardware and settings.
 - [x] Configure GitHub Actions for Release native/Rust checks on Windows, macOS, and Linux, with sanitizer jobs where supported.
-- [ ] Verify the hosted cross-platform CI matrix passes on all supported operating systems.
+- [x] Verify the hosted cross-platform CI matrix passes on all supported operating systems.
 
 ## Priority 2: Integrate the Rust application
 
@@ -29,7 +29,7 @@ The previous checklist described unverified platform and UI features as complete
 - [x] Prevent a destination created during WAV processing from being overwritten at commit; cover the race with a regression test.
 - [x] Add WAV tests for PCM 24/32-bit, float32, multichannel, and malformed or incomplete files.
 - [ ] Manually verify the interactive UI and playback error paths.
-- [ ] Validate the Rust workspace on macOS and Linux.
+- [x] Validate the Rust workspace on macOS and Linux in the hosted CI matrix.
 
 ## Priority 3: Implement one real device path
 
@@ -49,7 +49,8 @@ The previous checklist described unverified platform and UI features as complete
 - [x] Add a Windows Release CTest gate requiring native-engine p99 processing time to stay below 25% of block deadlines for representative and worst-supported cases.
 - [ ] Optimize only measured bottlenecks; the current native benchmark shows ample headroom, while device-level measurements remain pending.
 - [x] Add a portable CPAL output-only path for macOS/Linux, reusing the Windows playback behavior and callback tests.
-- [ ] Validate the macOS/Linux build matrix and physical output endpoints before claiming those paths as verified.
+- [x] Pass the hosted macOS/Linux build and test matrix for the CPAL output path.
+- [ ] Run opt-in endpoint tests and manually validate output devices on macOS and Linux before claiming those paths as device-verified.
 - [x] Add bounded YIN pitch detection and a playback UI estimate with synthetic-tone, noise, and silence tests.
 - [ ] Manually validate pitch estimates and UI behavior with representative real WAV files.
 - [x] Add smoothed filter-coefficient transitions and signal tests for update discontinuities; manual listening remains pending.
