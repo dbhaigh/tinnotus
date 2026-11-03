@@ -257,7 +257,7 @@ impl TemporaryOutput {
     }
 
     fn commit(mut self) -> Result<(), WavError> {
-        fs::rename(&self.temporary_path, &self.output_path).map_err(|source| {
+        fs::hard_link(&self.temporary_path, &self.output_path).map_err(|source| {
             if source.kind() == ErrorKind::AlreadyExists || self.output_path.exists() {
                 WavError::OutputAlreadyExists(self.output_path.clone())
             } else {
@@ -267,7 +267,9 @@ impl TemporaryOutput {
                 }
             }
         })?;
-        self.committed = true;
+        if fs::remove_file(&self.temporary_path).is_ok() {
+            self.committed = true;
+        }
         Ok(())
     }
 }
@@ -528,7 +530,7 @@ fn map_output_error(path: &Path, error: hound::Error) -> WavError {
 
 #[cfg(test)]
 mod tests {
-    use super::{process_wav, WavError};
+    use super::{load_wav_for_playback, process_wav, WavError};
     use hound::{SampleFormat, WavReader, WavSpec, WavWriter};
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -562,6 +564,31 @@ mod tests {
         writer.finalize().expect("finalize test input");
     }
 
+    fn write_wav(path: &Path, spec: WavSpec, samples: &[f32]) {
+        let mut writer = WavWriter::create(path, spec).expect("create test WAV");
+        match spec.sample_format {
+            SampleFormat::Int => {
+                let scale = 2_f64.powi(i32::from(spec.bits_per_sample) - 1);
+                for sample in samples {
+                    let encoded = (f64::from(*sample) * scale)
+                        .round()
+                        .clamp(-scale, scale - 1.0) as i32;
+                    writer
+                        .write_sample(encoded)
+                        .expect("write integer test sample");
+                }
+            }
+            SampleFormat::Float => {
+                for sample in samples {
+                    writer
+                        .write_sample(*sample)
+                        .expect("write float test sample");
+                }
+            }
+        }
+        writer.finalize().expect("finalize test WAV");
+    }
+
     #[test]
     fn reports_monotonic_frame_progress_when_processing_pcm_wav() {
         let input_path = test_path("progress-input");
@@ -592,7 +619,11 @@ mod tests {
             .sum::<f64>()
             / samples.len() as f64)
             .sqrt();
-        assert!(output_rms / input_rms < 0.1);
+        assert!(
+            output_rms / input_rms < 0.1,
+            "notch output RMS ratio was {}",
+            output_rms / input_rms
+        );
         assert_eq!(progress.first(), Some(&(0, 48_000)));
         assert_eq!(progress.last(), Some(&(48_000, 48_000)));
         assert!(progress.windows(2).all(|pair| pair[0].0 <= pair[1].0));
@@ -712,6 +743,39 @@ mod tests {
     }
 
     #[test]
+    fn does_not_overwrite_destination_created_during_processing() {
+        let input_path = test_path("raced-output-input");
+        let output_path = test_path("raced-output");
+        write_pcm16_wav(&input_path, 1024);
+        let cancellation = AtomicBool::new(false);
+
+        let result = process_wav(
+            &input_path,
+            &output_path,
+            1000.0,
+            100.0,
+            &cancellation,
+            |done, total| {
+                if done == total && done > 0 {
+                    std::fs::write(&output_path, b"created during processing")
+                        .expect("create output during processing");
+                }
+            },
+        );
+
+        assert!(matches!(
+            result,
+            Err(WavError::OutputAlreadyExists(path)) if path == output_path
+        ));
+        assert_eq!(
+            std::fs::read(&output_path).expect("read output created during processing"),
+            b"created during processing"
+        );
+        std::fs::remove_file(input_path).expect("remove test input");
+        std::fs::remove_file(output_path).expect("remove test output");
+    }
+
+    #[test]
     fn loads_pcm_wav_samples_for_device_playback() {
         let path = test_path("playback-input");
         let spec = WavSpec {
@@ -732,5 +796,132 @@ mod tests {
         assert_eq!(audio.samples, [-1.0, 0.0, i16::MAX as f32 / 32768.0]);
 
         std::fs::remove_file(path).expect("remove test WAV");
+    }
+
+    #[test]
+    fn loads_and_processes_pcm24_pcm32_float32_and_multichannel_wavs() {
+        let specs = [
+            (
+                "pcm24",
+                WavSpec {
+                    channels: 2,
+                    sample_rate: 48_000,
+                    bits_per_sample: 24,
+                    sample_format: SampleFormat::Int,
+                },
+            ),
+            (
+                "pcm32",
+                WavSpec {
+                    channels: 2,
+                    sample_rate: 48_000,
+                    bits_per_sample: 32,
+                    sample_format: SampleFormat::Int,
+                },
+            ),
+            (
+                "float32",
+                WavSpec {
+                    channels: 2,
+                    sample_rate: 48_000,
+                    bits_per_sample: 32,
+                    sample_format: SampleFormat::Float,
+                },
+            ),
+            (
+                "six-channel",
+                WavSpec {
+                    channels: 6,
+                    sample_rate: 48_000,
+                    bits_per_sample: 24,
+                    sample_format: SampleFormat::Int,
+                },
+            ),
+        ];
+
+        for (label, spec) in specs {
+            let input_path = test_path(&format!("{label}-input"));
+            let output_path = test_path(&format!("{label}-output"));
+            let sample_count = usize::from(spec.channels) * 32;
+            let samples: Vec<f32> = (0..sample_count)
+                .map(|index| ((index % 7) as f32 - 3.0) * 0.1)
+                .collect();
+            write_wav(&input_path, spec, &samples);
+
+            let audio = load_wav_for_playback(&input_path).expect("decode supported WAV");
+            assert_eq!(audio.sample_rate, spec.sample_rate);
+            assert_eq!(audio.channels, usize::from(spec.channels));
+            assert_eq!(audio.samples.len(), sample_count);
+            assert!(audio.samples.iter().all(|sample| sample.is_finite()));
+            let tolerance = match spec.sample_format {
+                SampleFormat::Int => 1.0 / 2_f64.powi(i32::from(spec.bits_per_sample) - 1),
+                SampleFormat::Float => 1.0e-6,
+            };
+            for (sample, source) in audio.samples.iter().zip(&samples) {
+                assert!((f64::from(*sample) - f64::from(*source)).abs() <= tolerance);
+            }
+
+            process_wav(
+                &input_path,
+                &output_path,
+                1000.0,
+                100.0,
+                &AtomicBool::new(false),
+                |_, _| {},
+            )
+            .expect("process supported WAV");
+            let reader = WavReader::open(&output_path).expect("open processed WAV");
+            let output_spec = reader.spec();
+            assert_eq!(output_spec.channels, spec.channels);
+            assert_eq!(output_spec.sample_rate, spec.sample_rate);
+            assert_eq!(output_spec.bits_per_sample, spec.bits_per_sample);
+            assert_eq!(output_spec.sample_format, spec.sample_format);
+            drop(reader);
+            let processed = load_wav_for_playback(&output_path).expect("decode processed WAV");
+            assert_eq!(processed.channels, usize::from(spec.channels));
+            assert_eq!(processed.samples.len(), sample_count);
+            assert!(processed.samples.iter().all(|sample| sample.is_finite()));
+
+            std::fs::remove_file(input_path).expect("remove test input");
+            std::fs::remove_file(output_path).expect("remove test output");
+        }
+    }
+
+    #[test]
+    fn rejects_malformed_and_truncated_multichannel_wavs() {
+        let malformed_path = test_path("malformed");
+        std::fs::write(&malformed_path, b"not a WAV file").expect("write malformed file");
+        assert!(load_wav_for_playback(&malformed_path).is_err());
+
+        let spec = WavSpec {
+            channels: 2,
+            sample_rate: 48_000,
+            bits_per_sample: 16,
+            sample_format: SampleFormat::Int,
+        };
+        let truncated_path = test_path("truncated");
+        let truncated_output = test_path("truncated-output");
+        write_wav(&truncated_path, spec, &[0.25, -0.25, 0.5, -0.5]);
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&truncated_path)
+            .expect("open WAV for truncation");
+        let truncated_length = file.metadata().expect("read WAV metadata").len() - 1;
+        file.set_len(truncated_length).expect("truncate WAV data");
+        drop(file);
+        assert!(load_wav_for_playback(&truncated_path).is_err());
+        assert!(process_wav(
+            &truncated_path,
+            &truncated_output,
+            1000.0,
+            100.0,
+            &AtomicBool::new(false),
+            |_, _| {},
+        )
+        .is_err());
+        assert!(!truncated_output.exists());
+
+        std::fs::remove_file(malformed_path).expect("remove malformed file");
+        std::fs::remove_file(truncated_path).expect("remove truncated WAV");
     }
 }

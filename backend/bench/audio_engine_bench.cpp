@@ -79,11 +79,20 @@ constexpr std::chrono::milliseconds minimum_throughput_duration{50};
 constexpr std::size_t throughput_batch_iterations = 1024;
 constexpr std::size_t latency_sample_pass_count = 3;
 constexpr std::size_t throughput_pass_count = 3;
+constexpr double performance_budget_fraction = 0.25;
 
 struct Options {
     std::size_t warmup_iterations = 300;
     std::size_t timed_iterations = 2000;
     std::filesystem::path output_directory = "docs/benchmarks";
+    bool check_realtime_budget = false;
+};
+
+struct PerformanceBudgetCase {
+    int sample_rate;
+    std::size_t channels;
+    std::size_t notches;
+    std::size_t block_frames;
 };
 
 struct BenchmarkResult {
@@ -100,6 +109,12 @@ struct BenchmarkResult {
     double cpu_time_estimate_milliseconds = 0.0;
     double checksum = 0.0;
 };
+
+constexpr std::array<PerformanceBudgetCase, 3> performance_budget_cases{{
+    {48000, 2, 1, 128},
+    {96000, 8, 8, 32},
+    {96000, 8, 8, 1024},
+}};
 
 struct ThroughputMeasurement {
     std::size_t iterations = 0;
@@ -145,7 +160,8 @@ bool parse_size(const std::string& value, std::size_t& parsed, bool allow_zero) 
 
 void print_usage(const char* executable) {
     std::cout << "Usage: " << executable
-              << " [--warmup count] [--iterations count] [--output-dir path]\n"
+              << " [--warmup count] [--iterations count] [--output-dir path] "
+                 "[--check-realtime-budget]\n"
               << "Defaults: --warmup 300 --iterations 2000 "
                  "--output-dir docs/benchmarks\n";
 }
@@ -196,6 +212,11 @@ bool parse_options(int argc, char* argv[], Options& options, bool& show_help) {
         if (argument == "--help" || argument == "-h") {
             show_help = true;
             return true;
+        }
+
+        if (argument == "--check-realtime-budget") {
+            options.check_realtime_budget = true;
+            continue;
         }
 
         if (argument == "--warmup" || argument == "--iterations" ||
@@ -347,7 +368,7 @@ std::string platform_slug() {
 
 std::tm local_time(std::time_t timestamp) {
     std::tm value{};
-#if defined(_MSC_VER)
+#if defined(_WIN32)
     localtime_s(&value, &timestamp);
 #else
     localtime_r(&timestamp, &value);
@@ -528,6 +549,51 @@ bool run_case(
     return true;
 }
 
+bool run_realtime_budget_smoke(const Options& options, std::string& error) {
+    std::cout << "Checking AudioEngine p99 block time against 25% of each block deadline\n";
+    for (const PerformanceBudgetCase& benchmark_case : performance_budget_cases) {
+        BenchmarkResult result;
+        if (!run_case(
+                benchmark_case.sample_rate,
+                benchmark_case.channels,
+                benchmark_case.notches,
+                benchmark_case.block_frames,
+                options,
+                result,
+                error)) {
+            return false;
+        }
+
+        const double deadline_ns =
+            static_cast<double>(benchmark_case.block_frames) * 1000000000.0 /
+            static_cast<double>(benchmark_case.sample_rate);
+        const double limit_ns = deadline_ns * performance_budget_fraction;
+        if (!std::isfinite(result.p99_block_ns) || result.p99_block_ns > limit_ns) {
+            std::ostringstream message;
+            message << "AudioEngine p99 budget exceeded at "
+                    << benchmark_case.sample_rate << " Hz, "
+                    << benchmark_case.channels << " channels, "
+                    << benchmark_case.notches << " notches, "
+                    << benchmark_case.block_frames << " frames: "
+                    << result.p99_block_ns / 1000.0 << " us p99 exceeds "
+                    << limit_ns / 1000.0 << " us (25% of the "
+                    << deadline_ns / 1000.0 << " us block deadline)";
+            error = message.str();
+            return false;
+        }
+
+        std::cout << "  " << benchmark_case.sample_rate << " Hz, "
+                  << benchmark_case.channels << " channels, "
+                  << benchmark_case.notches << " notches, "
+                  << benchmark_case.block_frames << " frames: "
+                  << std::fixed << std::setprecision(2)
+                  << result.p99_block_ns / 1000.0 << " us p99 / "
+                  << deadline_ns / 1000.0 << " us deadline ("
+                  << result.p99_block_ns / deadline_ns * 100.0 << "%)\n";
+    }
+    return true;
+}
+
 bool write_report(
     const std::filesystem::path& report_path,
     const Options& options,
@@ -622,6 +688,14 @@ int main(int argc, char* argv[]) {
     if (!configure_benchmark_thread(thread_affinity, error)) {
         std::cerr << error << '\n';
         return 1;
+    }
+
+    if (options.check_realtime_budget) {
+        if (!run_realtime_budget_smoke(options, error)) {
+            std::cerr << error << '\n';
+            return 1;
+        }
+        return 0;
     }
 
     std::error_code filesystem_error;

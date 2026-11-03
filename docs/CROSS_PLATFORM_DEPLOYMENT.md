@@ -1,6 +1,6 @@
 # Cross-Platform Deployment Guide
 
-> **Status notice:** This is a historical architecture and deployment proposal, not a build guide or evidence that its platform adapters are implemented or supported; some paths in its examples refer to archived prototypes. The current product version is `0.0.0.2`; the Cargo workspace encodes it as `0.0.0+2` because Cargo requires SemVer. The verified CMake target builds the portable C++ processing core and pitch detector; Windows output playback is implemented in the Rust backend. See [ARCHITECTURE.md](../ARCHITECTURE.md), [PROJECT_STATUS.md](../PROJECT_STATUS.md), and the platform `PROTOTYPE.md` files for current scope.
+> **Status notice:** This is a historical architecture and deployment proposal, not a build guide or evidence that its platform adapters are verified or supported; some paths in its examples refer to archived prototypes. The current product version is `0.0.0.2`; the Cargo workspace encodes it as `0.0.0+2` because Cargo requires SemVer. The verified CMake target builds the portable C++ processing core and pitch detector. A Rust CPAL output-only path is wired for Windows, macOS, and Linux, but only Windows endpoint validation has been completed. See [ARCHITECTURE.md](../ARCHITECTURE.md), [PROJECT_STATUS.md](../PROJECT_STATUS.md), and the platform `PROTOTYPE.md` files for current scope.
 
 ## Overview
 

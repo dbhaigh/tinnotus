@@ -93,3 +93,17 @@ add_custom_target(bench
     USES_TERMINAL
     VERBATIM
 )
+
+if(TINNOTUS_BUILD_TEST)
+    add_test(
+        NAME tinnotus_audio_engine_performance_budget
+        COMMAND tinnotus_audio_engine_bench --check-realtime-budget
+    )
+    set_tests_properties(
+        tinnotus_audio_engine_performance_budget
+        PROPERTIES
+            LABELS "performance"
+            RUN_SERIAL TRUE
+            TIMEOUT 120
+    )
+endif()

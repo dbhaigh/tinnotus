@@ -19,7 +19,7 @@ The verified native build is a portable C++ audio-processing core:
 - A small C ABI for creating an engine, configuring notches, and processing blocks.
 - Tests for notch response, passband preservation, channel isolation, buffer edge cases and wraparound, invalid inputs, C ABI behavior, and sustained concurrent queue use.
 
-The Rust application wraps the C ABI and provides bounded-block WAV processing with frame progress and cancellation, plus Windows output-only WAV playback through shared-mode WASAPI. Cancelled offline processing stops between blocks and does not commit its temporary output. During playback, a separate YIN analysis worker estimates source pitch and confidence without running pitch analysis in the audio callback. Playback enumerates output devices, prefers float32, and converts the preloaded WAV to the selected device format before starting the stream. Capture and live-device support on macOS/Linux are not implemented. GitHub Actions is configured to run CMake/CTest and Rust test/release-build jobs on Windows, macOS, and Linux, plus Debug sanitizer jobs where supported and a real-time source guard. Hosted cross-platform validation remains pending. The native benchmark measures processing performance, not end-to-end device latency.
+The Rust application wraps the C ABI and provides bounded-block WAV processing with frame progress and cancellation, plus a CPAL output-only WAV playback path wired for Windows, macOS, and Linux (WASAPI shared mode on Windows). Cancelled offline processing stops between blocks and does not commit its temporary output; successful output uses a no-clobber hard link, and filesystems without hard-link support return an output error. During playback, a separate YIN analysis worker estimates source pitch and confidence without running pitch analysis in the audio callback. Playback enumerates output devices, prefers float32, and converts the preloaded WAV before starting the stream with a 32-tap band-limited resampler when rates differ. Channel-count mismatches use a documented conservative mapping; speaker-layout-aware surround mixing is not available because channel masks are not exposed by the current adapters. Initial notch configuration is applied before audio starts; subsequent changes transition over 20 ms without resetting live filter state. Microphone capture and automatic device recovery are not implemented. GitHub Actions is configured to run CMake/CTest and Rust test/release-build jobs on Windows, macOS, and Linux, plus Debug sanitizer jobs where supported and a real-time source guard. Hosted cross-platform validation remains pending. The native benchmark measures processing performance, not end-to-end device latency.
 
 ## Build and test the native core
 
@@ -68,6 +68,14 @@ cmake --build out/bench --config Release --target bench
 
 The target runs all 450 combinations of sample rate, channel count, active notches, and block size. It warms each case for 300 blocks, collects three batches of 2,000 per-block latency samples (6,000 total), and performs three independent throughput passes of at least 50 ms each (extending short passes in batches). Min, average, and p99 use the pooled latency samples; p99 uses the nearest-rank percentile. Throughput and its single-thread CPU-time estimate come from the median-rate pass, based on elapsed wall time and including scheduler delays. On Windows, the benchmark thread is pinned to the lowest available logical processor; other platforms leave affinity to the OS. Results are written to `docs/benchmarks/YYYY-MM-DD-<platform>.md`. The executable also accepts `--warmup`, `--iterations`, and `--output-dir` for custom runs; `--iterations` sets latency samples per batch and the minimum block count per throughput pass, while the 50 ms floor still applies. `--help` lists defaults. Use Release builds and avoid heavy background load when comparing runs.
 
+When both native tests and the benchmark are enabled, CTest also registers `tinnotus_audio_engine_performance_budget`. It checks p99 processing time for representative and worst-supported engine cases against 25% of each block's audio deadline; Windows Release CI runs this gate serially to reduce timing interference. This measures the native engine only, not end-to-end CPAL playback latency, callback conversion cost, device CPU use, or hardware underruns. Run it locally with:
+
+```powershell
+cmake -S . -B out/bench -DTINNOTUS_BUILD_TEST=ON -DTINNOTUS_BUILD_BENCH=ON
+cmake --build out/bench --config Release --target tinnotus_audio_engine_bench
+ctest --test-dir out/bench -C Release -R tinnotus_audio_engine_performance_budget --output-on-failure
+```
+
 ## Rust application
 
 The Rust app requires a Rust toolchain, CMake, and a C++17 compiler. From the repository root:
@@ -80,7 +88,7 @@ cargo run
 `cargo test --workspace` passes in the current Windows workspace. Launching the interactive UI is not part of that test run.
 The Cargo workspace contains the application and backend packages; the legacy `shared/Cargo.toml` is excluded. Its native C++ sources are built through CMake.
 
-On Windows, the application also offers live WAV playback to a selected output device. The playback callback runs the native engine in WASAPI shared mode, and the WAV is decoded and converted before the stream starts. See [ARCHITECTURE.md](./ARCHITECTURE.md) for callback rules, failure reporting, and the manual device checklist. A headless callback test does not replace physical-device validation.
+The application includes a CPAL output path for Windows, macOS, and Linux. CPAL uses the platform audio host (WASAPI shared mode on Windows); WAV decoding and format conversion happen before the stream starts. The output path has been exercised on Windows, while macOS/Linux builds and physical-device validation remain pending for the current changes. See [ARCHITECTURE.md](./ARCHITECTURE.md) for callback rules, failure reporting, and the manual device checklist. A headless callback test does not replace physical-device validation.
 
 See the [real-time safety rules](./docs/REALTIME_RULES.md) for the callback contract and the source guard's scope.
 
@@ -98,7 +106,7 @@ The Rust desktop application is written to `target/release/tinnotus.exe` on Wind
 
 ## Audio-engine contract
 
-`tinnotus::audio::AudioEngine` is configured with a sample rate and channel count (1–8). Control changes are submitted from one producer thread and applied by `process` on one audio thread. Processing uses fixed filter state and does not allocate or acquire locks. Configuration requests use a bounded queue and return an explicit error when invalid or full.
+`tinnotus::audio::AudioEngine` is configured with a sample rate and channel count (1–8). Control changes are submitted from one producer thread and applied by `process` on one audio thread. Processing uses fixed filter state and does not allocate or acquire locks. Configuration requests use a bounded queue and return an explicit error when invalid or full. Notch changes begin at block boundaries and ramp coefficients over 10 ms; filter state is preserved during updates and cleared after a removal transition.
 
 `SpscAudioBuffer` is a preallocated single-producer/single-consumer queue measured in samples. Its caller must preserve the one-writer/one-reader contract.
 
@@ -110,4 +118,4 @@ The C-compatible declarations are in `shared/audio_engine_ffi.h`. The C ABI uses
 2. Verify the hosted native and Rust build matrix on Windows, macOS, and Linux.
 3. Validate pitch estimates and UI behavior with representative real WAV files.
 4. Measure end-to-end device latency, CPU use, and underruns before publishing performance claims.
-5. Add capture and additional desktop device paths after Windows playback validation.
+5. Validate the macOS/Linux output path on hosted builds and physical endpoints; defer microphone capture until Windows playback acceptance is complete.

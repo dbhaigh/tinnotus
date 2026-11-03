@@ -1,8 +1,7 @@
 use std::env;
 
 fn main() {
-    let manifest_dir =
-        env::var("CARGO_MANIFEST_DIR").expect("Cargo provides CARGO_MANIFEST_DIR");
+    let manifest_dir = env::var("CARGO_MANIFEST_DIR").expect("Cargo provides CARGO_MANIFEST_DIR");
     let install_dir = cmake::Config::new(manifest_dir)
         .define("TINNOTUS_BUILD_TEST", "OFF")
         .build();
@@ -30,4 +29,6 @@ fn main() {
     println!("cargo:rerun-if-changed=../shared/audio_engine.cpp");
     println!("cargo:rerun-if-changed=../shared/audio_engine_ffi.h");
     println!("cargo:rerun-if-changed=../shared/audio_engine_ffi.cpp");
+    println!("cargo:rerun-if-changed=../shared/pitch_detector.hpp");
+    println!("cargo:rerun-if-changed=../shared/pitch_detector.cpp");
 }

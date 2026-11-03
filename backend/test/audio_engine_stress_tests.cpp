@@ -272,6 +272,15 @@ void test_command_queue_long_duration(std::chrono::seconds duration) {
     }
     check(engine.process(nullptr, nullptr, 0),
           "audio engine applies final command queue drain");
+    constexpr std::size_t transition_frames = 48000 * 20 / 1000;
+    std::vector<float> transition_input(transition_frames * channels, 0.0f);
+    std::vector<float> transition_output(transition_input.size(), 0.0f);
+    check(engine.process(
+              transition_input.data(),
+              transition_output.data(),
+              transition_frames
+          ),
+          "audio engine completes the final removal transitions");
 
     const std::array<float, 8> probe_input{
         0.25f, -0.5f, 0.75f, -1.0f, 0.125f, -0.25f, 0.5f, -0.75f

@@ -26,24 +26,31 @@ The previous checklist described unverified platform and UI features as complete
 - [x] Add a typed Rust wrapper around the C ABI, including explicit queue-full handling.
 - [x] Implement a bounded-block WAV processing workflow and connect it to the egui UI.
 - [x] Build and test the Rust workspace with `cargo test --workspace` on Windows.
-- [ ] Manually verify the interactive UI and broaden WAV format and error-path tests.
+- [x] Prevent a destination created during WAV processing from being overwritten at commit; cover the race with a regression test.
+- [x] Add WAV tests for PCM 24/32-bit, float32, multichannel, and malformed or incomplete files.
+- [ ] Manually verify the interactive UI and playback error paths.
 - [ ] Validate the Rust workspace on macOS and Linux.
 
 ## Priority 3: Implement one real device path
 
-- [x] Implement Windows shared-mode WASAPI output enumeration, format selection, start/stop, and stream errors.
+- [x] Implement CPAL output enumeration, format selection, start/stop, and stream errors (WASAPI shared mode on Windows).
 - [x] Preallocate callback resources and keep locks, allocation, file I/O, and logging out of callbacks.
 - [x] Play decoded WAV samples through `AudioEngine` and expose live notch updates.
 - [x] Add a headless callback test covering 30 seconds of audio data.
+- [x] Add opt-in endpoint tests for default-device completion/live notch changes and repeated selected-device start/stop; validate on the current Windows host.
 - [x] Document the real-time contract and add a CI source guard for known callback and processing regions.
 - [ ] Manually test real-device start/stop, notch changes, unplug/reconnect, and high CPU load.
+- [x] Replace linear interpolation with band-limited resampling and define/test conservative channel-count conversion; speaker-layout-aware surround mixing remains unsupported without channel masks.
 
 ## Priority 4: Expand based on measurements
 
 - [x] Establish a repeatable native processing benchmark with documented hardware and settings.
 - [ ] Measure end-to-end device latency, CPU use, and underruns with real hardware.
-- [ ] Optimize only measured bottlenecks and add regression thresholds.
-- [ ] Add additional desktop platforms after the first path passes the same tests.
+- [x] Add a Windows Release CTest gate requiring native-engine p99 processing time to stay below 25% of block deadlines for representative and worst-supported cases.
+- [ ] Optimize only measured bottlenecks; the current native benchmark shows ample headroom, while device-level measurements remain pending.
+- [x] Add a portable CPAL output-only path for macOS/Linux, reusing the Windows playback behavior and callback tests.
+- [ ] Validate the macOS/Linux build matrix and physical output endpoints before claiming those paths as verified.
 - [x] Add bounded YIN pitch detection and a playback UI estimate with synthetic-tone, noise, and silence tests.
 - [ ] Manually validate pitch estimates and UI behavior with representative real WAV files.
-- [ ] Keep product and medical-adjacent claims appropriately qualified.
+- [x] Add smoothed filter-coefficient transitions and signal tests for update discontinuities; manual listening remains pending.
+- [x] Audit active user-facing product claims and keep them appropriately qualified; excluded legacy prototypes are not shipped.

@@ -153,6 +153,150 @@ void test_notch_response() {
           "notch preserves a distant passband tone");
 }
 
+void test_notch_updates_are_smoothed() {
+    constexpr int sample_rate = 48000;
+    constexpr double pi = 3.14159265358979323846;
+    constexpr double frequency = 1000.0;
+    constexpr std::size_t warmup_frames = sample_rate;
+    constexpr std::size_t transition_frames = sample_rate / 50;
+
+    tinnotus::audio::AudioEngine engine(sample_rate, 1);
+    check(engine.setNotch(0, frequency, 100.0) ==
+          tinnotus::audio::RequestResult::queued,
+          "transition test configures its initial notch");
+
+    std::vector<float> warmup_input(warmup_frames);
+    std::vector<float> warmup_output(warmup_frames);
+    for (std::size_t frame = 0; frame < warmup_frames; ++frame) {
+        warmup_input[frame] = static_cast<float>(
+            std::sin(2.0 * pi * frequency * static_cast<double>(frame) / sample_rate + pi / 2.0)
+        );
+    }
+    check(engine.process(warmup_input.data(), warmup_output.data(), warmup_frames),
+          "engine settles the initial notch");
+    check(std::abs(warmup_output.back()) < 0.1f,
+          "initial notch attenuates the tone before an update");
+
+    check(engine.setNotch(0, 5000.0, 100.0) ==
+          tinnotus::audio::RequestResult::queued,
+          "engine accepts a live notch update");
+    std::vector<float> transition_input(transition_frames);
+    std::vector<float> transition_output(transition_frames);
+    for (std::size_t frame = 0; frame < transition_frames; ++frame) {
+        const std::size_t source_frame = warmup_frames + frame;
+        transition_input[frame] = static_cast<float>(
+            std::sin(2.0 * pi * frequency * static_cast<double>(source_frame) / sample_rate +
+                     pi / 2.0)
+        );
+    }
+    check(engine.process(
+              transition_input.data(),
+              transition_output.data(),
+              transition_frames
+          ),
+          "engine processes a smoothed notch transition");
+
+    double maximum_step = std::abs(
+        static_cast<double>(transition_output.front()) - warmup_output.back()
+    );
+    for (std::size_t frame = 1; frame < transition_frames; ++frame) {
+        maximum_step = std::max(
+            maximum_step,
+            std::abs(static_cast<double>(transition_output[frame]) -
+                     transition_output[frame - 1])
+        );
+    }
+    check(maximum_step < 0.25,
+          "notch update does not produce a large one-sample discontinuity");
+
+    constexpr std::size_t measurement_frames = sample_rate;
+    std::vector<float> measurement_input(measurement_frames);
+    std::vector<float> measurement_output(measurement_frames);
+    for (std::size_t frame = 0; frame < measurement_frames; ++frame) {
+        const std::size_t source_frame = warmup_frames + transition_frames + frame;
+        measurement_input[frame] = static_cast<float>(
+            std::sin(2.0 * pi * frequency * static_cast<double>(source_frame) / sample_rate +
+                     pi / 2.0)
+        );
+    }
+    check(engine.process(
+              measurement_input.data(),
+              measurement_output.data(),
+              measurement_frames
+          ),
+          "engine processes audio after the transition");
+
+    double energy = 0.0;
+    for (std::size_t frame = measurement_frames / 2; frame < measurement_frames; ++frame) {
+        energy += static_cast<double>(measurement_output[frame]) * measurement_output[frame];
+    }
+    const double rms = std::sqrt(energy / (measurement_frames / 2));
+    check(rms > 0.6, "updated notch passes the original tone after the transition");
+}
+
+void test_rapid_notch_updates_remain_finite_and_bounded() {
+    constexpr int sample_rate = 48000;
+    constexpr std::size_t block_frames = sample_rate / 200;
+    constexpr double pi = 3.14159265358979323846;
+    constexpr double frequency = 1000.0;
+
+    tinnotus::audio::AudioEngine engine(sample_rate, 1);
+    std::array<float, block_frames> input{};
+    std::array<float, block_frames> output{};
+    double previous_sample = 0.0;
+    double maximum_step = 0.0;
+
+    for (std::size_t update = 0; update < 8; ++update) {
+        const double center_frequency = 500.0 + 900.0 * static_cast<double>(update);
+        check(engine.setNotch(0, center_frequency, 100.0) ==
+              tinnotus::audio::RequestResult::queued,
+              "engine queues rapid notch updates");
+        for (std::size_t frame = 0; frame < block_frames; ++frame) {
+            const std::size_t source_frame = update * block_frames + frame;
+            input[frame] = static_cast<float>(
+                0.5 * std::sin(2.0 * pi * frequency * static_cast<double>(source_frame) /
+                               sample_rate)
+            );
+        }
+        check(engine.process(input.data(), output.data(), block_frames),
+              "engine processes a rapid notch-update block");
+
+        for (std::size_t frame = 0; frame < block_frames; ++frame) {
+            check(std::isfinite(output[frame]) && std::abs(output[frame]) < 2.0f,
+                  "rapid updates keep output finite and bounded");
+            maximum_step = std::max(
+                maximum_step,
+                std::abs(static_cast<double>(output[frame]) - previous_sample)
+            );
+            previous_sample = output[frame];
+        }
+    }
+
+    check(engine.removeNotch(0) == tinnotus::audio::RequestResult::queued,
+          "engine queues a removal during a transition");
+    for (std::size_t frame = 0; frame < block_frames; ++frame) {
+        const std::size_t source_frame = 8 * block_frames + frame;
+        input[frame] = static_cast<float>(
+            0.5 * std::sin(2.0 * pi * frequency * static_cast<double>(source_frame) /
+                           sample_rate)
+        );
+    }
+    check(engine.process(input.data(), output.data(), block_frames),
+          "engine processes a removal during a transition");
+    for (std::size_t frame = 0; frame < block_frames; ++frame) {
+        check(std::isfinite(output[frame]) && std::abs(output[frame]) < 2.0f,
+              "notch removal keeps output finite and bounded");
+        maximum_step = std::max(
+            maximum_step,
+            std::abs(static_cast<double>(output[frame]) - previous_sample)
+        );
+        previous_sample = output[frame];
+    }
+
+    check(maximum_step < 0.5,
+          "rapid retargeting and removal do not create a large discontinuity");
+}
+
 void test_identity_and_stereo_isolation() {
     tinnotus::audio::AudioEngine identity(48000, 2);
     const float input[] = {0.25f, -0.5f, 0.75f, -1.0f};
@@ -434,6 +578,8 @@ int main() {
     test_buffer_single_sample_capacity();
     test_buffer_power_of_two_exact_wraparound();
     test_notch_response();
+    test_notch_updates_are_smoothed();
+    test_rapid_notch_updates_remain_finite_and_bounded();
     test_identity_and_stereo_isolation();
     test_channel_processing_matches_scalar_reference();
     test_validation_and_bounded_commands();
