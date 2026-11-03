@@ -14,9 +14,11 @@ The previous checklist described unverified platform and UI features as complete
 
 - [x] Build the native target and run its test executable in the current Windows workspace.
 - [ ] Configure, build, and run the native tests on macOS and Linux.
-- [ ] Add long-duration and concurrent producer/consumer tests for the SPSC buffer.
-- [ ] Add sanitizer coverage where supported.
-- [ ] Benchmark processing at supported sample rates, channel counts, and notch counts.
+- [x] Add long-duration and concurrent producer/consumer tests for the SPSC buffer and command queue.
+- [x] Add sanitizer coverage where supported.
+- [x] Benchmark processing across sample rates, channel counts, notch counts, and block sizes; document the hardware and settings.
+- [x] Configure GitHub Actions for Release native/Rust checks on Windows, macOS, and Linux, with sanitizer jobs where supported.
+- [ ] Verify the hosted cross-platform CI matrix passes on all supported operating systems.
 
 ## Priority 2: Integrate the Rust application
 
@@ -29,15 +31,19 @@ The previous checklist described unverified platform and UI features as complete
 
 ## Priority 3: Implement one real device path
 
-- [ ] Choose one desktop API and implement device setup, format negotiation, start/stop, and errors.
-- [ ] Preallocate all callback resources and keep locks, allocation, file I/O, and logging out of callbacks.
-- [ ] Connect input or file playback through the engine to output.
-- [ ] Test sustained playback, device changes, underruns, and shutdown behavior.
+- [x] Implement Windows shared-mode WASAPI output enumeration, format selection, start/stop, and stream errors.
+- [x] Preallocate callback resources and keep locks, allocation, file I/O, and logging out of callbacks.
+- [x] Play decoded WAV samples through `AudioEngine` and expose live notch updates.
+- [x] Add a headless callback test covering 30 seconds of audio data.
+- [x] Document the real-time contract and add a CI source guard for known callback and processing regions.
+- [ ] Manually test real-device start/stop, notch changes, unplug/reconnect, and high CPU load.
 
 ## Priority 4: Expand based on measurements
 
-- [ ] Establish repeatable latency, CPU, and underrun benchmarks with documented hardware and settings.
+- [x] Establish a repeatable native processing benchmark with documented hardware and settings.
+- [ ] Measure end-to-end device latency, CPU use, and underruns with real hardware.
 - [ ] Optimize only measured bottlenecks and add regression thresholds.
 - [ ] Add additional desktop platforms after the first path passes the same tests.
-- [ ] Implement pitch detection and visualization only with accuracy and usability tests.
+- [x] Add bounded YIN pitch detection and a playback UI estimate with synthetic-tone, noise, and silence tests.
+- [ ] Manually validate pitch estimates and UI behavior with representative real WAV files.
 - [ ] Keep product and medical-adjacent claims appropriately qualified.

@@ -4,6 +4,18 @@
 #include <cmath>
 #include <limits>
 
+#if defined(TINNOTUS_AUDIO_ENABLE_AVX2) || defined(_M_AVX2) || defined(__AVX2__)
+#include <immintrin.h>
+#define TINNOTUS_AUDIO_USE_AVX2
+#elif defined(_M_X64) || (defined(_M_IX86_FP) && _M_IX86_FP >= 2) || \
+    defined(__SSE2__)
+#include <emmintrin.h>
+#define TINNOTUS_AUDIO_USE_SSE2
+#elif defined(_M_ARM64) || defined(__aarch64__)
+#include <arm_neon.h>
+#define TINNOTUS_AUDIO_USE_NEON
+#endif
+
 namespace tinnotus::audio {
 
 SpscAudioBuffer::SpscAudioBuffer(std::size_t capacity_samples)
@@ -111,29 +123,181 @@ bool AudioEngine::process(
 
     applyPendingCommands();
 
-    for (std::size_t frame = 0; frame < frame_count; ++frame) {
-        for (std::size_t channel = 0; channel < channels_; ++channel) {
-            const std::size_t sample_index = frame * channels_ + channel;
-            double sample = input[sample_index];
+#if defined(TINNOTUS_AUDIO_USE_AVX2) || \
+    defined(TINNOTUS_AUDIO_USE_SSE2) || \
+    defined(TINNOTUS_AUDIO_USE_NEON)
+    if (channels_ < 6) {
+#else
+    {
+#endif
+        for (std::size_t frame = 0; frame < frame_count; ++frame) {
+            for (std::size_t channel = 0; channel < channels_; ++channel) {
+                const std::size_t sample_index = frame * channels_ + channel;
+                double sample = input[sample_index];
 
-            for (std::size_t notch = 0; notch < max_notches; ++notch) {
-                if (!enabled_[notch]) {
-                    continue;
+                for (std::size_t notch = 0; notch < max_notches; ++notch) {
+                    if (!enabled_[notch]) {
+                        continue;
+                    }
+
+                    const Coefficients& coefficients = coefficients_[notch];
+                    FilterState& state = scalar_states_[notch][channel];
+                    const double filtered = coefficients.b0 * sample + state.z1;
+                    state.z1 = coefficients.b1 * sample - coefficients.a1 * filtered +
+                               state.z2;
+                    state.z2 = coefficients.b2 * sample - coefficients.a2 * filtered;
+                    sample = filtered;
                 }
 
-                const Coefficients& coefficients = coefficients_[notch];
-                FilterState& state = states_[notch][channel];
-                const double filtered = coefficients.b0 * sample + state.z1;
-                state.z1 = coefficients.b1 * sample - coefficients.a1 * filtered + state.z2;
-                state.z2 = coefficients.b2 * sample - coefficients.a2 * filtered;
-                sample = filtered;
+                output[sample_index] = static_cast<float>(sample);
             }
-
-            output[sample_index] = static_cast<float>(sample);
         }
+        return true;
     }
 
+#if defined(TINNOTUS_AUDIO_USE_AVX2) || \
+    defined(TINNOTUS_AUDIO_USE_SSE2) || \
+    defined(TINNOTUS_AUDIO_USE_NEON)
+    std::array<double, max_channels> frame_samples;
+    for (std::size_t frame = 0; frame < frame_count; ++frame) {
+        const std::size_t frame_offset = frame * channels_;
+        for (std::size_t channel = 0; channel < channels_; ++channel) {
+            frame_samples[channel] = input[frame_offset + channel];
+        }
+
+        for (std::size_t notch = 0; notch < max_notches; ++notch) {
+            if (!enabled_[notch]) {
+                continue;
+            }
+
+            const Coefficients& coefficients = coefficients_[notch];
+            SimdFilterState& state = simd_states_[notch];
+            std::size_t channel = 0;
+
+#if defined(TINNOTUS_AUDIO_USE_AVX2)
+            const __m256d b0_avx = _mm256_set1_pd(coefficients.b0);
+            const __m256d b1_avx = _mm256_set1_pd(coefficients.b1);
+            const __m256d b2_avx = _mm256_set1_pd(coefficients.b2);
+            const __m256d a1_avx = _mm256_set1_pd(coefficients.a1);
+            const __m256d a2_avx = _mm256_set1_pd(coefficients.a2);
+            for (; channel + 4 <= channels_; channel += 4) {
+                const __m256d sample = _mm256_loadu_pd(frame_samples.data() + channel);
+                const __m256d z1 = _mm256_loadu_pd(state.z1.data() + channel);
+                const __m256d z2 = _mm256_loadu_pd(state.z2.data() + channel);
+                const __m256d filtered = _mm256_add_pd(
+                    _mm256_mul_pd(b0_avx, sample),
+                    z1
+                );
+                const __m256d next_z1 = _mm256_add_pd(
+                    _mm256_sub_pd(
+                        _mm256_mul_pd(b1_avx, sample),
+                        _mm256_mul_pd(a1_avx, filtered)
+                    ),
+                    z2
+                );
+                const __m256d next_z2 = _mm256_sub_pd(
+                    _mm256_mul_pd(b2_avx, sample),
+                    _mm256_mul_pd(a2_avx, filtered)
+                );
+                _mm256_storeu_pd(frame_samples.data() + channel, filtered);
+                _mm256_storeu_pd(state.z1.data() + channel, next_z1);
+                _mm256_storeu_pd(state.z2.data() + channel, next_z2);
+            }
+
+            if (channel + 2 <= channels_) {
+                const __m128d b0_sse = _mm_set1_pd(coefficients.b0);
+                const __m128d b1_sse = _mm_set1_pd(coefficients.b1);
+                const __m128d b2_sse = _mm_set1_pd(coefficients.b2);
+                const __m128d a1_sse = _mm_set1_pd(coefficients.a1);
+                const __m128d a2_sse = _mm_set1_pd(coefficients.a2);
+                for (; channel + 2 <= channels_; channel += 2) {
+                    const __m128d sample = _mm_loadu_pd(frame_samples.data() + channel);
+                    const __m128d z1 = _mm_loadu_pd(state.z1.data() + channel);
+                    const __m128d z2 = _mm_loadu_pd(state.z2.data() + channel);
+                    const __m128d filtered = _mm_add_pd(_mm_mul_pd(b0_sse, sample), z1);
+                    const __m128d next_z1 = _mm_add_pd(
+                        _mm_sub_pd(
+                            _mm_mul_pd(b1_sse, sample),
+                            _mm_mul_pd(a1_sse, filtered)
+                        ),
+                        z2
+                    );
+                    const __m128d next_z2 = _mm_sub_pd(
+                        _mm_mul_pd(b2_sse, sample),
+                        _mm_mul_pd(a2_sse, filtered)
+                    );
+                    _mm_storeu_pd(frame_samples.data() + channel, filtered);
+                    _mm_storeu_pd(state.z1.data() + channel, next_z1);
+                    _mm_storeu_pd(state.z2.data() + channel, next_z2);
+                }
+            }
+#elif defined(TINNOTUS_AUDIO_USE_SSE2)
+            const __m128d b0 = _mm_set1_pd(coefficients.b0);
+            const __m128d b1 = _mm_set1_pd(coefficients.b1);
+            const __m128d b2 = _mm_set1_pd(coefficients.b2);
+            const __m128d a1 = _mm_set1_pd(coefficients.a1);
+            const __m128d a2 = _mm_set1_pd(coefficients.a2);
+            for (; channel + 2 <= channels_; channel += 2) {
+                const __m128d sample = _mm_loadu_pd(frame_samples.data() + channel);
+                const __m128d z1 = _mm_loadu_pd(state.z1.data() + channel);
+                const __m128d z2 = _mm_loadu_pd(state.z2.data() + channel);
+                const __m128d filtered = _mm_add_pd(_mm_mul_pd(b0, sample), z1);
+                const __m128d next_z1 = _mm_add_pd(
+                    _mm_sub_pd(_mm_mul_pd(b1, sample), _mm_mul_pd(a1, filtered)),
+                    z2
+                );
+                const __m128d next_z2 = _mm_sub_pd(
+                    _mm_mul_pd(b2, sample),
+                    _mm_mul_pd(a2, filtered)
+                );
+                _mm_storeu_pd(frame_samples.data() + channel, filtered);
+                _mm_storeu_pd(state.z1.data() + channel, next_z1);
+                _mm_storeu_pd(state.z2.data() + channel, next_z2);
+            }
+#elif defined(TINNOTUS_AUDIO_USE_NEON)
+            const float64x2_t b0 = vdupq_n_f64(coefficients.b0);
+            const float64x2_t b1 = vdupq_n_f64(coefficients.b1);
+            const float64x2_t b2 = vdupq_n_f64(coefficients.b2);
+            const float64x2_t a1 = vdupq_n_f64(coefficients.a1);
+            const float64x2_t a2 = vdupq_n_f64(coefficients.a2);
+            for (; channel + 2 <= channels_; channel += 2) {
+                const float64x2_t sample = vld1q_f64(frame_samples.data() + channel);
+                const float64x2_t z1 = vld1q_f64(state.z1.data() + channel);
+                const float64x2_t z2 = vld1q_f64(state.z2.data() + channel);
+                const float64x2_t filtered = vaddq_f64(vmulq_f64(b0, sample), z1);
+                const float64x2_t next_z1 = vaddq_f64(
+                    vsubq_f64(vmulq_f64(b1, sample), vmulq_f64(a1, filtered)),
+                    z2
+                );
+                const float64x2_t next_z2 = vsubq_f64(
+                    vmulq_f64(b2, sample),
+                    vmulq_f64(a2, filtered)
+                );
+                vst1q_f64(frame_samples.data() + channel, filtered);
+                vst1q_f64(state.z1.data() + channel, next_z1);
+                vst1q_f64(state.z2.data() + channel, next_z2);
+            }
+#endif
+
+            for (; channel < channels_; ++channel) {
+                const double sample = frame_samples[channel];
+                    const double filtered =
+                        coefficients.b0 * sample + state.z1[channel];
+                    state.z1[channel] =
+                        coefficients.b1 * sample - coefficients.a1 * filtered +
+                        state.z2[channel];
+                    state.z2[channel] =
+                        coefficients.b2 * sample - coefficients.a2 * filtered;
+                    frame_samples[channel] = filtered;
+                }
+        }
+
+        for (std::size_t channel = 0; channel < channels_; ++channel) {
+            output[frame_offset + channel] = static_cast<float>(frame_samples[channel]);
+        }
+    }
     return true;
+#endif
 }
 
 bool AudioEngine::calculateCoefficients(
@@ -192,7 +356,8 @@ void AudioEngine::applyPendingCommands() noexcept {
         const Command& command = commands_[read_index % command_queue_capacity];
         coefficients_[command.index] = command.coefficients;
         enabled_[command.index] = command.enabled;
-        states_[command.index].fill(FilterState{});
+        scalar_states_[command.index].fill(FilterState{});
+        simd_states_[command.index] = SimdFilterState{};
         ++read_index;
     }
 

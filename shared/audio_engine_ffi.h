@@ -48,6 +48,14 @@ TINNOTUS_AUDIO_API int tinnotus_audio_engine_process(
     float* output,
     size_t frame_count
 );
+/* Analyze off the real-time callback; frequency is zero below the confidence threshold. */
+TINNOTUS_AUDIO_API int tinnotus_pitch_detect(
+    const float* samples,
+    size_t sample_count,
+    int sample_rate,
+    double* frequency_hz,
+    double* confidence
+);
 
 #ifdef __cplusplus
 }

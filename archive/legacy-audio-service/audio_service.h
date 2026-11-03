@@ -1,3 +1,4 @@
+// Archived legacy C++ service prototype; not part of active builds.
 /**
  * @file audio_service.h
  * @brief Audio service for real-time and offline audio processing

@@ -1,3 +1,4 @@
+// Archived legacy binding; not built or used by the active workspace.
 /**
  * @file binding_windows.rs
  * @brief Windows FFI bindings for Tinnotus backend

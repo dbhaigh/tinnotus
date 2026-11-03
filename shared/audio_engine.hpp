@@ -64,6 +64,11 @@ private:
         double z2 = 0.0;
     };
 
+    struct SimdFilterState {
+        std::array<double, max_channels> z1{};
+        std::array<double, max_channels> z2{};
+    };
+
     struct Command {
         std::size_t index = 0;
         bool enabled = false;
@@ -88,7 +93,8 @@ private:
     alignas(64) std::atomic<std::size_t> command_write_index_{0};
     std::array<Coefficients, max_notches> coefficients_{};
     std::array<bool, max_notches> enabled_{};
-    std::array<std::array<FilterState, max_channels>, max_notches> states_{};
+    std::array<std::array<FilterState, max_channels>, max_notches> scalar_states_{};
+    std::array<SimdFilterState, max_notches> simd_states_{};
 };
 
 } // namespace tinnotus::audio

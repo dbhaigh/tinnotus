@@ -1,0 +1,161 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  realtime-safety:
+    name: Real-time source guard
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check real-time hot paths
+        run: python3 scripts/check_realtime_safety.py
+
+  release:
+    name: Release (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - windows-latest
+          - macos-latest
+          - ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux GUI build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes \
+            pkg-config \
+            libegl1-mesa-dev \
+            libgbm-dev \
+            libwayland-dev \
+            libx11-dev \
+            libx11-xcb-dev \
+            libxcb-randr0-dev \
+            libxcb-shape0-dev \
+            libxcb-xfixes0-dev \
+            libxcb-xinerama0-dev \
+            libxcursor-dev \
+            libxi-dev \
+            libxinerama-dev \
+            libxkbcommon-dev \
+            libxkbcommon-x11-dev \
+            libxrandr-dev
+
+      - name: Cache CMake build
+        uses: actions/cache@v4
+        with:
+          path: build/ci-native
+          key: cmake-native-${{ runner.os }}-${{ hashFiles('CMakeLists.txt', 'backend/CMakeLists.txt', 'backend/test/**', 'cmake/**', 'shared/**') }}
+          restore-keys: |
+            cmake-native-${{ runner.os }}-
+
+      - name: Configure native tests
+        if: runner.os != 'Windows'
+        run: cmake -S . -B build/ci-native -DTINNOTUS_BUILD_TEST=ON -DCMAKE_BUILD_TYPE=Release
+
+      - name: Configure native tests (Visual Studio)
+        if: runner.os == 'Windows'
+        run: cmake -S . -B build/ci-native -DTINNOTUS_BUILD_TEST=ON
+
+      - name: Build native core and tests
+        run: cmake --build build/ci-native --config Release --parallel
+
+      - name: Run native tests
+        run: ctest --test-dir build/ci-native -C Release --output-on-failure --parallel 2
+
+      - name: Set up stable Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo dependencies and build output
+        uses: Swatinem/rust-cache@v2
+
+      - name: Test Rust workspace
+        run: cargo test --workspace --locked
+
+      - name: Exercise virtual Windows audio callback for 30 seconds
+        if: runner.os == 'Windows'
+        run: cargo test -p tinnotus-audio-backend --locked virtual_null_output_runs_for_thirty_seconds -- --ignored
+
+      - name: Build Rust workspace
+        run: cargo build --workspace --release --locked
+
+  sanitizers:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: ASan + UBSan (Linux)
+            os: ubuntu-latest
+            sanitizer: linux-asan-ubsan
+            cmake_args: "-DTINNOTUS_ENABLE_ASAN=ON -DTINNOTUS_ENABLE_UBSAN=ON"
+          - name: TSan (Linux)
+            os: ubuntu-latest
+            sanitizer: linux-tsan
+            cmake_args: "-DTINNOTUS_ENABLE_TSAN=ON"
+          - name: ASan + UBSan (macOS)
+            os: macos-latest
+            sanitizer: macos-asan-ubsan
+            cmake_args: "-DTINNOTUS_ENABLE_ASAN=ON -DTINNOTUS_ENABLE_UBSAN=ON"
+          - name: TSan (macOS)
+            os: macos-latest
+            sanitizer: macos-tsan
+            cmake_args: "-DTINNOTUS_ENABLE_TSAN=ON"
+          - name: ASan (Windows)
+            os: windows-latest
+            sanitizer: windows-asan
+            cmake_args: "-DTINNOTUS_ENABLE_ASAN=ON"
+    env:
+      ASAN_OPTIONS: halt_on_error=1
+      TSAN_OPTIONS: halt_on_error=1
+      UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache CMake sanitizer build
+        uses: actions/cache@v4
+        with:
+          path: build/ci-sanitizer
+          key: cmake-sanitizer-${{ runner.os }}-${{ matrix.sanitizer }}-${{ hashFiles('CMakeLists.txt', 'backend/CMakeLists.txt', 'backend/test/**', 'cmake/**', 'shared/**') }}
+          restore-keys: |
+            cmake-sanitizer-${{ runner.os }}-${{ matrix.sanitizer }}-
+
+      - name: Configure sanitizer build
+        if: runner.os != 'Windows'
+        run: >
+          cmake -S . -B build/ci-sanitizer
+          -DTINNOTUS_BUILD_TEST=ON
+          -DCMAKE_BUILD_TYPE=Debug
+          ${{ matrix.cmake_args }}
+
+      - name: Configure sanitizer build (Visual Studio)
+        if: runner.os == 'Windows'
+        run: >
+          cmake -S . -B build/ci-sanitizer
+          -DTINNOTUS_BUILD_TEST=ON
+          ${{ matrix.cmake_args }}
+
+      - name: Build native core and tests
+        run: cmake --build build/ci-sanitizer --config Debug --parallel
+
+      - name: Run sanitizer tests
+        run: ctest --test-dir build/ci-sanitizer -C Debug --output-on-failure --parallel 2

@@ -1,8 +1,11 @@
 #include "audio_engine.hpp"
 #include "audio_engine_ffi.h"
 
+#include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <iostream>
 #include <vector>
 
@@ -35,6 +38,76 @@ void test_buffer_wraparound_and_capacity() {
           output[2] == 6.0f && output[3] == 7.0f,
           "buffer preserves FIFO order across wraparound");
     check(buffer.available() == 0, "buffer reports empty after draining");
+}
+
+void test_buffer_zero_capacity_and_null_operations() {
+    tinnotus::audio::SpscAudioBuffer buffer(0);
+    float sample = 1.0f;
+
+    check(buffer.capacity() == 0, "zero-capacity buffer reports zero capacity");
+    check(buffer.available() == 0, "zero-capacity buffer is empty");
+    check(buffer.tryWrite(nullptr, 0), "zero-length write accepts a null source");
+    check(buffer.tryWrite(&sample, 0), "zero-length write does not require capacity");
+    check(!buffer.tryWrite(&sample, 1), "zero-capacity buffer rejects a sample");
+    check(!buffer.tryWrite(nullptr, 1), "non-empty write rejects a null source");
+    check(buffer.tryRead(nullptr, 0) == 0,
+          "zero-length read accepts a null destination");
+    check(buffer.tryRead(nullptr, 1) == 0,
+          "read with a null destination returns no samples");
+    check(buffer.tryRead(&sample, 1) == 0,
+          "zero-capacity buffer cannot return samples");
+    check(buffer.available() == 0, "zero-capacity buffer stays empty after operations");
+}
+
+void test_buffer_single_sample_capacity() {
+    tinnotus::audio::SpscAudioBuffer buffer(1);
+    float output = 0.0f;
+
+    check(buffer.tryWrite(nullptr, 0), "zero-length write accepts a null source");
+    check(buffer.tryRead(nullptr, 0) == 0,
+          "zero-length read accepts a null destination");
+    const float initial = 42.0f;
+    check(buffer.tryWrite(&initial, 1), "single-sample buffer accepts a sample");
+    check(!buffer.tryWrite(nullptr, 1), "non-empty write rejects a null source");
+    check(buffer.tryRead(nullptr, 1) == 0, "non-empty read rejects a null destination");
+    check(buffer.available() == 1, "null read leaves the buffered sample untouched");
+    check(buffer.tryRead(&output, 1) == 1 && output == initial,
+          "single-sample buffer still returns data after a null read");
+
+    check(buffer.tryRead(&output, 1) == 0, "single-sample buffer starts empty");
+    for (int i = 0; i < 32; ++i) {
+        const float input = static_cast<float>(i + 1);
+        check(buffer.tryWrite(&input, 1), "single-sample buffer accepts one sample");
+        check(buffer.available() == 1, "single-sample buffer reports full capacity");
+        check(!buffer.tryWrite(&input, 1), "single-sample buffer rejects a full write");
+        check(buffer.tryRead(&output, 1) == 1, "single-sample buffer returns its sample");
+        check(output == input, "single-sample buffer preserves data across wraparound");
+        check(buffer.available() == 0, "single-sample buffer is empty after reading");
+    }
+}
+
+void test_buffer_power_of_two_exact_wraparound() {
+    tinnotus::audio::SpscAudioBuffer buffer(4);
+    const float initial[] = {1.0f, 2.0f, 3.0f};
+    const float wrapped[] = {4.0f, 5.0f, 6.0f};
+    const float overflow = 7.0f;
+    float output[4] = {};
+
+    check(buffer.tryWrite(initial, 3), "power-of-two buffer accepts an initial block");
+    check(buffer.tryRead(output, 2) == 2, "power-of-two buffer advances its read index");
+    check(output[0] == 1.0f && output[1] == 2.0f,
+          "power-of-two buffer preserves the initial samples");
+    check(buffer.tryWrite(wrapped, 3),
+          "power-of-two buffer writes exactly across the ring boundary");
+    check(buffer.available() == buffer.capacity(),
+          "power-of-two buffer reports full after an exact-capacity wraparound");
+    check(!buffer.tryWrite(&overflow, 1), "full power-of-two buffer rejects overflow");
+    check(buffer.tryRead(output, 4) == 4,
+          "power-of-two buffer reads all samples after wraparound");
+    check(output[0] == 3.0f && output[1] == 4.0f &&
+          output[2] == 5.0f && output[3] == 6.0f,
+          "power-of-two buffer preserves FIFO order across exact wraparound");
+    check(buffer.available() == 0, "power-of-two buffer is empty after draining");
 }
 
 double measure_tone_ratio(double frequency_hz, bool enable_notch) {
@@ -108,6 +181,123 @@ void test_identity_and_stereo_isolation() {
     check(right_channel_is_silent, "filter state is isolated per channel");
 }
 
+struct ReferenceCoefficients {
+    double b0 = 1.0;
+    double b1 = 0.0;
+    double b2 = 0.0;
+    double a1 = 0.0;
+    double a2 = 0.0;
+};
+
+struct ReferenceState {
+    double z1 = 0.0;
+    double z2 = 0.0;
+};
+
+void process_scalar_reference(
+    const float* input,
+    float* output,
+    std::size_t frame_count,
+    std::size_t channels,
+    const std::array<ReferenceCoefficients, tinnotus::audio::AudioEngine::max_notches>& coefficients
+) {
+    std::array<
+        std::array<ReferenceState, tinnotus::audio::AudioEngine::max_channels>,
+        tinnotus::audio::AudioEngine::max_notches
+    > states{};
+
+    for (std::size_t frame = 0; frame < frame_count; ++frame) {
+        for (std::size_t channel = 0; channel < channels; ++channel) {
+            const std::size_t sample_index = frame * channels + channel;
+            double sample = input[sample_index];
+            for (std::size_t notch = 0; notch < coefficients.size(); ++notch) {
+                ReferenceState& state = states[notch][channel];
+                const ReferenceCoefficients& filter = coefficients[notch];
+                const double filtered = filter.b0 * sample + state.z1;
+                state.z1 = filter.b1 * sample - filter.a1 * filtered + state.z2;
+                state.z2 = filter.b2 * sample - filter.a2 * filtered;
+                sample = filtered;
+            }
+            output[sample_index] = static_cast<float>(sample);
+        }
+    }
+}
+
+void test_channel_processing_matches_scalar_reference() {
+    constexpr int sample_rate = 48000;
+    constexpr std::size_t frame_count = 257;
+    constexpr std::size_t first_block_frames = 37;
+    constexpr double pi = 3.14159265358979323846;
+    constexpr std::array<std::size_t, 7> channel_counts{1, 2, 4, 5, 6, 7, 8};
+
+    for (const std::size_t channels : channel_counts) {
+        tinnotus::audio::AudioEngine engine(sample_rate, channels);
+        std::array<ReferenceCoefficients, tinnotus::audio::AudioEngine::max_notches>
+            coefficients{};
+        bool configured = true;
+        for (std::size_t notch = 0; notch < coefficients.size(); ++notch) {
+            const double center_frequency = 500.0 + 900.0 * static_cast<double>(notch);
+            const double bandwidth = 90.0 + 11.0 * static_cast<double>(notch);
+            const double omega = 2.0 * pi * center_frequency / sample_rate;
+            const double q = center_frequency / bandwidth;
+            const double alpha = std::sin(omega) / (2.0 * q);
+            const double a0 = 1.0 + alpha;
+            const double cosine = std::cos(omega);
+
+            coefficients[notch].b0 = 1.0 / a0;
+            coefficients[notch].b1 = -2.0 * cosine / a0;
+            coefficients[notch].b2 = 1.0 / a0;
+            coefficients[notch].a1 = -2.0 * cosine / a0;
+            coefficients[notch].a2 = (1.0 - alpha) / a0;
+            configured &= engine.setNotch(notch, center_frequency, bandwidth) ==
+                tinnotus::audio::RequestResult::queued;
+        }
+        check(configured, "scalar-reference test configures every notch");
+        if (!configured) {
+            continue;
+        }
+
+        std::vector<float> input(frame_count * channels);
+        std::vector<float> output(input.size());
+        std::vector<float> expected(input.size());
+        std::uint32_t random_state = 0x12345678U + static_cast<std::uint32_t>(channels);
+        for (float& sample : input) {
+            random_state = random_state * 1664525U + 1013904223U;
+            sample = static_cast<float>((random_state >> 8) & 0xFFFFU) / 32767.5f - 1.0f;
+        }
+
+        process_scalar_reference(
+            input.data(),
+            expected.data(),
+            frame_count,
+            channels,
+            coefficients
+        );
+        const bool processed_first_block = engine.process(
+            input.data(),
+            output.data(),
+            first_block_frames
+        );
+        const bool processed_second_block = engine.process(
+            input.data() + first_block_frames * channels,
+            output.data() + first_block_frames * channels,
+            frame_count - first_block_frames
+        );
+        check(processed_first_block && processed_second_block,
+              "engine processes split blocks");
+
+        bool matches_reference = true;
+        for (std::size_t sample = 0; sample < output.size(); ++sample) {
+            if (std::abs(static_cast<double>(output[sample]) - expected[sample]) > 1.0e-6) {
+                matches_reference = false;
+                break;
+            }
+        }
+        check(matches_reference,
+              "output matches the scalar reference within 1e-6");
+    }
+}
+
 void test_validation_and_bounded_commands() {
     tinnotus::audio::AudioEngine invalid_engine(0, 1);
     check(!invalid_engine.isValid(), "engine rejects an invalid sample rate");
@@ -134,6 +324,81 @@ void test_validation_and_bounded_commands() {
           "zero-frame processing drains pending control commands");
     check(engine.removeNotch(0) == tinnotus::audio::RequestResult::queued,
           "command queue accepts commands after the audio thread drains it");
+}
+
+void test_pitch_detection() {
+    constexpr int sample_rate = 48000;
+    constexpr std::size_t sample_count = 4096;
+    constexpr double pi = 3.14159265358979323846;
+    constexpr std::array<double, 6> frequencies{55.0, 110.0, 220.0, 440.0, 880.0, 1760.0};
+    std::vector<float> samples(sample_count);
+    double detected_frequency = 0.0;
+    double confidence = 0.0;
+
+    for (const double frequency : frequencies) {
+        for (std::size_t i = 0; i < samples.size(); ++i) {
+            samples[i] = static_cast<float>(
+                std::sin(2.0 * pi * frequency * static_cast<double>(i) / sample_rate)
+            );
+        }
+        check(tinnotus_pitch_detect(
+                  samples.data(),
+                  samples.size(),
+                  sample_rate,
+                  &detected_frequency,
+                  &confidence
+              ) == TINNOTUS_AUDIO_OK,
+              "pitch API accepts a valid analysis window");
+        check(detected_frequency > 0.0 &&
+                  std::abs(detected_frequency - frequency) <= std::max(1.0, frequency * 0.01),
+              "pitch estimate is within one percent for a synthetic sine");
+        check(confidence >= 0.8, "synthetic sine produces high pitch confidence");
+    }
+
+    std::fill(samples.begin(), samples.end(), 0.0f);
+    check(tinnotus_pitch_detect(
+              samples.data(),
+              samples.size(),
+              sample_rate,
+              &detected_frequency,
+              &confidence
+          ) == TINNOTUS_AUDIO_OK,
+          "pitch API accepts a silent window");
+    check(detected_frequency == 0.0 && confidence < 0.1,
+          "silence returns no pitch and low confidence");
+
+    std::uint32_t random_state = 0xC0FFEEU;
+    for (float& sample : samples) {
+        random_state = random_state * 1664525U + 1013904223U;
+        sample = static_cast<float>((random_state >> 8) & 0xFFFFU) / 32767.5f - 1.0f;
+    }
+    check(tinnotus_pitch_detect(
+              samples.data(),
+              samples.size(),
+              sample_rate,
+              &detected_frequency,
+              &confidence
+          ) == TINNOTUS_AUDIO_OK,
+          "pitch API accepts a noise window");
+    check(detected_frequency == 0.0 && confidence < 0.8,
+          "noise returns no pitch and low confidence");
+
+    check(tinnotus_pitch_detect(
+              nullptr,
+              sample_count,
+              sample_rate,
+              &detected_frequency,
+              &confidence
+          ) == TINNOTUS_AUDIO_INVALID_ARGUMENT,
+          "pitch API rejects a null sample window");
+    check(tinnotus_pitch_detect(
+              samples.data(),
+              sample_count,
+              sample_rate,
+              nullptr,
+              &confidence
+          ) == TINNOTUS_AUDIO_INVALID_ARGUMENT,
+          "pitch API rejects a null result pointer");
 }
 
 void test_c_api() {
@@ -165,9 +430,14 @@ void test_c_api() {
 
 int main() {
     test_buffer_wraparound_and_capacity();
+    test_buffer_zero_capacity_and_null_operations();
+    test_buffer_single_sample_capacity();
+    test_buffer_power_of_two_exact_wraparound();
     test_notch_response();
     test_identity_and_stereo_isolation();
+    test_channel_processing_matches_scalar_reference();
     test_validation_and_bounded_commands();
+    test_pitch_detection();
     test_c_api();
 
     if (failures != 0) {

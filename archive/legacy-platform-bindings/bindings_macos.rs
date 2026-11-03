@@ -1,3 +1,4 @@
+// Archived legacy binding; not built or used by the active workspace.
 /**
  * @file binding_macos.rs
  * @brief macOS FFI bindings for Tinnotus backend

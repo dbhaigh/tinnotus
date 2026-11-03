@@ -1,10 +1,10 @@
 [package]
 name = "tinnotus"
-version = "0.0.0+1"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
 authors = ["Tinnotus Team"]
 description = "Experimental frequency-specific audio processing"
-license = "MIT"
+license.workspace = true
 repository = "https://github.com/dbhaigh/tinnotus"
 readme = "README.md"
 keywords = ["audio", "dsp", "notch-filter"]
@@ -12,8 +12,14 @@ categories = ["multimedia::audio"]
 
 [workspace]
 members = ["backend"]
+# `shared` contains active C++ sources and excluded legacy Rust scaffolding.
 exclude = ["shared"]
 resolver = "2"
+
+[workspace.package]
+version = "0.0.0+2"
+edition = "2021"
+license = "MIT"
 
 [dependencies]
 eframe = "0.27"

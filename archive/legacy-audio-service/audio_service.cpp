@@ -1,3 +1,4 @@
+// Archived legacy C++ service prototype; not part of active builds.
 /**
  * @file audio_service.cpp
  * @brief Audio service implementation for Tinnotus

@@ -1,6 +1,6 @@
 # Cross-Platform Deployment Guide
 
-> **Status notice:** This document describes intended architecture and deployment options; it is not evidence that those platform adapters are implemented or supported. The current product version is `0.0.0.1`; Cargo manifests encode it as `0.0.0+1` because Cargo requires SemVer. The verified CMake target currently builds only the portable C++ processing core. See [PROJECT_STATUS.md](../PROJECT_STATUS.md) for current scope.
+> **Status notice:** This is a historical architecture and deployment proposal, not a build guide or evidence that its platform adapters are implemented or supported; some paths in its examples refer to archived prototypes. The current product version is `0.0.0.2`; the Cargo workspace encodes it as `0.0.0+2` because Cargo requires SemVer. The verified CMake target builds the portable C++ processing core and pitch detector; Windows output playback is implemented in the Rust backend. See [ARCHITECTURE.md](../ARCHITECTURE.md), [PROJECT_STATUS.md](../PROJECT_STATUS.md), and the platform `PROTOTYPE.md` files for current scope.
 
 ## Overview
 
@@ -194,7 +194,7 @@ vcpkg install portname --triplet x64-windows
 // Cargo.toml
 [package]
 name = "tinnotus_desktop"
-version = "0.0.0+1"
+version = "0.0.0+2"
 edition = "2021"
 
 [dependencies]
@@ -969,35 +969,6 @@ impl TinnotusBackend {
 
 ---
 
-## Release status
+## Current status
 
-Version `0.0.0.1` identifies the experimental audio core and WAV workflow described in [PROJECT_STATUS.md](../PROJECT_STATUS.md). It is not a claim of a platform release: device capture/playback and supported desktop or mobile deployments have not been verified. List platforms as supported only after their builds and runtime behavior have been tested.
-
-**Features**:
-- [x] Manual notch frequency entry
-- [x] Basic notch filter (IIR)
-- [x] Simple pitch detection
-- [ ] Auto-detection
-- [ ] Multiple notch support
-
-**Known Issues**:
-- Pitch detection accuracy needs improvement
-- iOS FFI wrapper incomplete
-- Background processing not supported
-
----
-
-## Conclusion
-
-The architecture is designed for:
-- **Modularity**: Easy to add features
-- **Performance**: C++ backend for DSP
-- **Cross-platform**: Unified API, platform-specific implementations
-- **Maintainability**: Clear separation of concerns
-
-Next steps:
-1. Implement core DSP algorithms
-2. Build and test on one platform first (macOS recommended)
-3. Port to other platforms iteratively
-4. Gather user feedback
-5. Iterate and improve
+This proposal's implementation checklists and platform examples are historical and may not match the current code. The current product version is `0.0.0.2` (Cargo version `0.0.0+2`). For the verified feature set, build instructions, known limitations, and roadmap, use [PROJECT_STATUS.md](../PROJECT_STATUS.md) and [README.md](../README.md). For the implemented threading model, use [ARCHITECTURE.md](../ARCHITECTURE.md).

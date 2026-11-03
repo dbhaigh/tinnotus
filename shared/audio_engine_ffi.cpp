@@ -1,6 +1,7 @@
 #include "audio_engine_ffi.h"
 
 #include "audio_engine.hpp"
+#include "pitch_detector.hpp"
 
 #include <new>
 
@@ -83,5 +84,37 @@ extern "C" int tinnotus_audio_engine_process(
         !engine->implementation.process(input, output, frame_count)) {
         return TINNOTUS_AUDIO_INVALID_ARGUMENT;
     }
+    return TINNOTUS_AUDIO_OK;
+}
+
+extern "C" int tinnotus_pitch_detect(
+    const float* samples,
+    std::size_t sample_count,
+    int sample_rate,
+    double* frequency_hz,
+    double* confidence
+) {
+    if (frequency_hz != nullptr) {
+        *frequency_hz = 0.0;
+    }
+    if (confidence != nullptr) {
+        *confidence = 0.0;
+    }
+    if (frequency_hz == nullptr || confidence == nullptr) {
+        return TINNOTUS_AUDIO_INVALID_ARGUMENT;
+    }
+
+    tinnotus::audio::PitchEstimate estimate;
+    if (!tinnotus::audio::PitchDetector::detect(
+            samples,
+            sample_count,
+            sample_rate,
+            estimate
+        )) {
+        return TINNOTUS_AUDIO_INVALID_ARGUMENT;
+    }
+
+    *frequency_hz = estimate.frequency_hz;
+    *confidence = estimate.confidence;
     return TINNOTUS_AUDIO_OK;
 }

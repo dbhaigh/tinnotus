@@ -1,9 +1,10 @@
 [package]
+# Legacy Rust prototype manifest; intentionally excluded from the root workspace.
 name = "tinnotus"
-version = "0.0.0+1"
+version = "0.0.0+2"
 edition = "2021"
 authors = ["Tinnotus Team"]
-description = "Shared definitions and types for Tinnotus cross-platform notch sound therapy"
+description = "Legacy Rust prototype scaffolding for Tinnotus audio processing"
 license = "MIT"
 keywords = ["tinnitus", "audio", "dsp", "notch-filter", "ffi"]
 categories = ["multimedia::audio", "ffi"]
