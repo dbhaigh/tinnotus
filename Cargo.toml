@@ -1,0 +1,34 @@
+[package]
+name = "tinnotus"
+version = "0.0.0+1"
+edition = "2021"
+authors = ["Tinnotus Team"]
+description = "Experimental frequency-specific audio processing"
+license = "MIT"
+repository = "https://github.com/dbhaigh/tinnotus"
+readme = "README.md"
+keywords = ["audio", "dsp", "notch-filter"]
+categories = ["multimedia::audio"]
+
+[workspace]
+members = ["backend"]
+exclude = ["shared"]
+resolver = "2"
+
+[dependencies]
+eframe = "0.27"
+egui = "0.27"
+hound = "3.5"
+tinnotus-audio-backend = { path = "backend" }
+
+[profile.release]
+lto = true
+codegen-units = 1
+opt-level = 3
+strip = true
+
+[profile.dev]
+opt-level = 1
+
+[lints.rust]
+unsafe_code = "deny"

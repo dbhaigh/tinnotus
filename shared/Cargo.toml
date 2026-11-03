@@ -1,0 +1,36 @@
+[package]
+name = "tinnotus"
+version = "0.0.0+1"
+edition = "2021"
+authors = ["Tinnotus Team"]
+description = "Shared definitions and types for Tinnotus cross-platform notch sound therapy"
+license = "MIT"
+keywords = ["tinnitus", "audio", "dsp", "notch-filter", "ffi"]
+categories = ["multimedia::audio", "ffi"]
+
+[lib]
+name = "tinnotus"
+path = "lib.rs"
+crate-type = ["lib", "cdylib", "staticlib"]
+
+[features]
+default = ["c-interface"]
+c-interface = []
+platform-macos = []
+platform-windows = []
+platform-linux = []
+platform-ios = []
+platform-android = []
+
+[dependencies]
+# Platform-specific dependencies (conditional)
+target-arch = { version = "0.0.10", optional = true }
+
+[dev-dependencies]
+criterion = "0.5"
+
+[[bench]]
+name = "shared_benchmark"
+harness = false
+
+[build-dependencies]

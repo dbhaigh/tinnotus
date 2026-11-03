@@ -1,0 +1,11 @@
+[package]
+name = "tinnotus-audio-backend"
+version = "0.0.0+1"
+edition = "2021"
+description = "C++ audio engine and safe Rust bindings"
+license = "MIT"
+build = "build.rs"
+links = "tinnotus_backend"
+
+[build-dependencies]
+cmake = "0.1"
